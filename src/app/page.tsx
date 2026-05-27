@@ -8,6 +8,8 @@ import {
   FileJson,
   Mic2,
   Play,
+  Radio,
+  Send,
   Settings,
   Sparkles,
   Upload,
@@ -16,7 +18,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, ReactElement, useEffect, useRef, useState } from "react";
 
-import type { GeneratedSprite, Mode, MouthFrame, MouthlessCleanPlate, MouthlessMask, MouthTrack, Quad, SpeedMode, WorkerMessage } from "@/lib/materials";
+import type { GeneratedSprite, Mode, MouthFrame, MouthlessCleanPlate, MouthlessMask, MouthSpriteName, MouthTrack, Quad, SpeedMode, WorkerMessage } from "@/lib/materials";
 import {
   analyzeMouthPatchFeatures,
   applyEllipseFeatherAlpha,
@@ -95,6 +97,314 @@ export default function Home() {
   const [voicevoxUrl, setVoicevoxUrl] = useState("http://127.0.0.1:50021");
   const [voicevoxStatus, setVoicevoxStatus] = useState("未接続");
 
+  const [openaiApiKey, setOpenaiApiKey] = useState("");
+  const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
+  const [availableModels, setAvailableModels] = useState<string[]>([
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
+  ]);
+  const [aivisUrl, setAivisUrl] = useState("http://127.0.0.1:10101");
+  const [selectedSpeaker, setSelectedSpeaker] = useState("2");
+  const [speakers, setSpeakers] = useState<any[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatSending, setIsChatSending] = useState(false);
+  const [lastReply, setLastReply] = useState("");
+
+  // Load settings on mount
+  useEffect(() => {
+    const key = localStorage.getItem("openai_api_key") || "";
+    const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
+    const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
+    const speaker = localStorage.getItem("aivis_speaker") || "2";
+    setOpenaiApiKey(key);
+    setOpenaiModel(model);
+    setAivisUrl(url);
+    setSelectedSpeaker(speaker);
+
+    if (url) {
+      void fetchSpeakers(url);
+    }
+    if (key) {
+      void fetchOpenaiModels(key);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const fetchOpenaiModels = async (key: string) => {
+    if (!key) return;
+    try {
+      const res = await fetch("https://api.openai.com/v1/models", {
+        headers: {
+          Authorization: `Bearer ${key}`,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Filter chat models (starts with gpt-) and exclude vision/instruct specific variants for simplicity
+        const chatModels = data.data
+          .map((m: any) => m.id)
+          .filter((id: string) => id.startsWith("gpt-") && !id.includes("vision") && !id.includes("instruct"))
+          .sort();
+        if (chatModels.length > 0) {
+          setAvailableModels(chatModels);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch OpenAI models:", err);
+    }
+  };
+
+  const fetchSpeakers = async (url: string) => {
+    try {
+      const res = await fetch("/api/aivis/speakers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ aivisUrl: url }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSpeakers(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch speakers:", err);
+    }
+  };
+
+  const handleOpenaiKeyChange = (key: string) => {
+    setOpenaiApiKey(key);
+    localStorage.setItem("openai_api_key", key);
+    void fetchOpenaiModels(key);
+  };
+
+  const handleOpenaiModelChange = (model: string) => {
+    setOpenaiModel(model);
+    localStorage.setItem("openai_model", model);
+  };
+
+  const handleAivisUrlChange = (url: string) => {
+    setAivisUrl(url);
+    localStorage.setItem("aivis_url", url);
+    void fetchSpeakers(url);
+  };
+
+  const handleSpeakerChange = (speaker: string) => {
+    setSelectedSpeaker(speaker);
+    localStorage.setItem("aivis_speaker", speaker);
+  };
+
+  const sendChatMessage = async () => {
+    if (!chatInput.trim() || !openaiApiKey || isChatSending) return;
+    setIsChatSending(true);
+
+    try {
+      // 1. OpenAI Chat Completion
+      const chatRes = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openaiApiKey}`,
+        },
+        body: JSON.stringify({
+          model: openaiModel,
+          messages: [{ role: "user", content: chatInput }],
+        }),
+      });
+
+      if (!chatRes.ok) {
+        let errMsg = chatRes.statusText;
+        try {
+          const errData = await chatRes.json();
+          if (errData.error?.message) {
+            errMsg = errData.error.message;
+          }
+        } catch (_) {}
+        throw new Error(`OpenAI API returned error: ${errMsg}`);
+      }
+
+      const chatData = await chatRes.json();
+      const replyText = chatData.choices[0].message.content;
+      setLastReply(replyText);
+
+      // 2. Aivis Speech synthesis
+      const synthRes = await fetch("/api/aivis/synthesis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: replyText,
+          speaker: Number(selectedSpeaker),
+          aivisUrl,
+        }),
+      });
+
+      if (!synthRes.ok) {
+        throw new Error("Speech synthesis failed");
+      }
+
+      const audioBuffer = await synthRes.arrayBuffer();
+
+      // 3. Play and sync mouth
+      await playAudioAndSyncMouth(audioBuffer);
+
+      setChatInput("");
+    } catch (err) {
+      console.error("Chat & LipSync error:", err);
+      alert(err instanceof Error ? err.message : "送信に失敗しました");
+    } finally {
+      setIsChatSending(false);
+    }
+  };
+
+  const playAudioAndSyncMouth = async (audioBuffer: ArrayBuffer) => {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const audioCtx = new AudioContextClass();
+    const buffer = await audioCtx.decodeAudioData(audioBuffer);
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.35;
+
+    source.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    const data = new Uint8Array(analyser.fftSize);
+    let animationFrameId = 0;
+
+    const syncMouth = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const value of data) {
+        const centered = (value - 128) / 128;
+        sum += centered * centered;
+      }
+      const rms = Math.sqrt(sum / data.length);
+      const level = Math.min(rms * 8, 1);
+
+      if (level > 0.55) {
+        setActiveMouthShape("open");
+      } else if (level > 0.22) {
+        setActiveMouthShape("half");
+      } else {
+        setActiveMouthShape("closed");
+      }
+
+      animationFrameId = requestAnimationFrame(syncMouth);
+    };
+
+    source.onended = () => {
+      cancelAnimationFrame(animationFrameId);
+      setActiveMouthShape("closed");
+      audioCtx.close();
+    };
+
+    source.start(0);
+    syncMouth();
+  };
+
+  const [scale, setScale] = useState(1);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [isDraggingVideo, setIsDraggingVideo] = useState(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    setIsDraggingVideo(true);
+    dragStartRef.current = { x: e.clientX - position.x, y: e.clientY - position.y };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!isDraggingVideo) return;
+    setPosition({
+      x: e.clientX - dragStartRef.current.x,
+      y: e.clientY - dragStartRef.current.y,
+    });
+  };
+
+  const handleMouseUp = () => {
+    setIsDraggingVideo(false);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    const zoomIntensity = 0.05;
+    const nextScale = Math.min(Math.max(scale - e.deltaY * zoomIntensity * 0.01, 0.2), 5);
+    setScale(nextScale);
+  };
+
+  const runtimeVideoRef = useRef<HTMLVideoElement | null>(null);
+  const runtimeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [activeMouthShape, setActiveMouthShape] = useState<string>("closed");
+  const runtimeLoopRef = useRef<number>(0);
+  const runtimeImageCacheRef = useRef<Record<string, HTMLImageElement>>({});
+
+  const updateRuntimeCanvas = () => {
+    const video = runtimeVideoRef.current;
+    const canvas = runtimeCanvasRef.current;
+    if (!video || !canvas || !track?.frames.length) return;
+
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const frameIndex = Math.min(
+      track.frames.length - 1,
+      Math.max(0, Math.floor(video.currentTime * track.fps))
+    );
+    const frame = track.frames[frameIndex];
+
+    if (frame?.valid && frame.quad) {
+      const spriteName = activeMouthShape.toLowerCase();
+      const sprite = mouthSprites.find((s) => s.name.toLowerCase() === spriteName) ||
+                     mouthSprites.find((s) => s.name.toLowerCase() === "closed");
+
+      if (sprite) {
+        let img = runtimeImageCacheRef.current[sprite.url];
+        if (!img) {
+          img = new Image();
+          img.src = sprite.url;
+          runtimeImageCacheRef.current[sprite.url] = img;
+        }
+
+        if (img.complete && img.naturalWidth > 0) {
+          drawWarpedPatch(ctx, img, frame.quad, img.naturalWidth || img.width, img.naturalHeight || img.height);
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (mode !== "runtime" || !mouthlessUrl) {
+      if (runtimeLoopRef.current) {
+        cancelAnimationFrame(runtimeLoopRef.current);
+        runtimeLoopRef.current = 0;
+      }
+      return;
+    }
+
+    const tick = () => {
+      updateRuntimeCanvas();
+      runtimeLoopRef.current = requestAnimationFrame(tick);
+    };
+
+    runtimeLoopRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (runtimeLoopRef.current) {
+        cancelAnimationFrame(runtimeLoopRef.current);
+        runtimeLoopRef.current = 0;
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, mouthlessUrl, track, activeMouthShape, mouthSprites]);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -130,6 +440,35 @@ export default function Home() {
     revokeObjectUrl(mouthlessUrlRef.current);
     mouthlessUrlRef.current = nextUrl;
     setMouthlessUrl(nextUrl);
+  };
+
+  const handleMouthlessUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setManagedMouthlessUrl(url);
+      setMouthlessStatus("アップロード完了");
+    }
+  };
+
+  const handleMouthSpriteUpload = (name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    const newSprite: GeneratedSprite = {
+      name,
+      url,
+      frameIndex: 0,
+      width: 0,
+      height: 0,
+    };
+
+    setManagedMouthSprites([
+      ...mouthSprites.filter((s) => s.name !== name),
+      newSprite,
+    ]);
+    setMouthStatus("手動追加");
   };
 
   const cancelScheduledFrameSync = () => {
@@ -826,27 +1165,18 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-[#f7f8fb] text-[#1d2430]">
       <div className="flex min-h-screen flex-col">
-        <header className="border-b border-slate-200 bg-white">
-          <div className="mx-auto flex max-w-[1560px] items-center justify-between px-5 py-3">
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md border border-slate-200 bg-slate-50">
-                <Sparkles className="size-5 text-teal-600" />
-              </div>
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">AITuber Maker</p>
-                <h1 className="text-lg font-semibold">素材生成ワークスペース</h1>
-              </div>
-            </div>
-            <nav className="flex rounded-md border border-slate-200 bg-slate-50 p-1">
+        <header className="absolute top-0 left-0 w-full z-50 bg-transparent">
+          <div className="mx-auto flex max-w-[1560px] items-center justify-start px-5 pt-6 pb-2">
+            <nav className="flex rounded-md border border-slate-200 bg-white p-1 shadow-sm">
               <ModeButton active={mode === "materials"} icon={<Wand2 />} label="素材生成" onClick={() => setMode("materials")} />
-              <ModeButton active={mode === "runtime"} icon={<Bot />} label="AITuber実行" onClick={() => setMode("runtime")} />
+              <ModeButton active={mode === "runtime"} icon={<Radio />} label="配信モード" onClick={() => setMode("runtime")} />
               <ModeButton active={mode === "settings"} icon={<Settings />} label="設定" onClick={() => setMode("settings")} />
             </nav>
           </div>
         </header>
 
         {mode === "materials" && (
-          <section className="mx-auto grid w-full max-w-[1560px] flex-1 grid-cols-[minmax(0,1fr)_390px] gap-4 px-5 py-4 max-lg:grid-cols-1">
+          <section className="mx-auto grid w-full max-w-[1560px] flex-1 grid-cols-[minmax(0,1fr)_390px] gap-4 px-5 pt-24 pb-4 max-lg:grid-cols-1">
             <div className="min-w-0">
               <div className={`relative grid min-h-[calc(100vh-132px)] overflow-auto rounded-md border border-slate-200 bg-white ${mouthlessUrl ? "place-items-start" : "place-items-center"}`}>
                 {videoUrl ? (
@@ -919,13 +1249,7 @@ export default function Home() {
                 動画を選ぶ
                 <input className="sr-only" type="file" accept="video/*" onChange={handleFileInput} />
               </label>
-              <InfoGrid
-                items={[
-                  ["ファイル", file?.name ?? "未選択"],
-                  ["サイズ", videoMeta.width ? `${videoMeta.width} x ${videoMeta.height}` : "-"],
-                  ["長さ", videoMeta.duration ? formatTime(videoMeta.duration) : "-"],
-                ]}
-              />
+
 
               <div className="h-px bg-slate-200" />
               <PanelTitle icon={<Activity />} title="口追跡JSON生成" badge={isAnalyzing ? "実行中" : track ? "完了" : "待機"} />
@@ -990,33 +1314,57 @@ export default function Home() {
                 <Play className="size-4" />
                 5種を自動抽出
               </button>
-              {mouthSprites.length > 0 && (
-                <div className="grid grid-cols-5 gap-2">
-                  {mouthSprites.map((sprite) => (
-                    <a
-                      className="grid gap-1 rounded-md border border-slate-200 bg-slate-50 p-2 text-center text-xs font-medium"
-                      download={`${sprite.name}.png`}
-                      href={sprite.url}
-                      key={sprite.name}
+              <div className="grid grid-cols-5 gap-2">
+                {mouthSpriteNames.map((name) => {
+                  const sprite = mouthSprites.find((s) => s.name === name);
+                  return (
+                    <label
+                      key={name}
+                      className="group relative grid gap-1 rounded-md border border-dashed border-slate-300 bg-slate-50 p-2 text-center text-xs font-medium cursor-pointer hover:border-teal-500 hover:bg-teal-50/10 transition"
                     >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img className="aspect-square w-full rounded bg-white object-contain" src={sprite.url} alt={`${sprite.name} mouth`} />
-                      <span>{sprite.name}</span>
-                    </a>
-                  ))}
-                </div>
-              )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="sr-only"
+                        onChange={(e) => handleMouthSpriteUpload(name, e)}
+                      />
+                      {sprite ? (
+                        <>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img className="aspect-square w-full rounded bg-white object-contain" src={sprite.url} alt={`${name} mouth`} />
+                          <span className="truncate text-slate-700">{name}</span>
+                          <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white opacity-0 group-hover:opacity-100 transition rounded-md text-[10px]">
+                            変更
+                          </span>
+                        </>
+                      ) : (
+                        <div className="flex aspect-square w-full flex-col items-center justify-center text-slate-400">
+                          <Upload className="size-4" />
+                          <span className="mt-1 text-[9px] truncate text-slate-500">{name}</span>
+                        </div>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
 
               <div className="h-px bg-slate-200" />
               <PanelTitle icon={<Video />} title="口無し動画" badge={mouthlessStatus} />
-              <button
-                className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={!track || !videoUrl || isGeneratingMouthless || isRunningAll}
-                onClick={() => void generateMouthlessVideo()}
-              >
-                <Play className="size-4" />
-                口無しWebM生成
-              </button>
+              <div className="flex gap-2">
+                <button
+                  className="flex-1 flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  disabled={!track || !videoUrl || isGeneratingMouthless || isRunningAll}
+                  onClick={() => void generateMouthlessVideo()}
+                >
+                  <Play className="size-4" />
+                  口無し生成
+                </button>
+                <label className="flex-1 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition">
+                  <Upload className="size-4" />
+                  動画をアップ
+                  <input className="sr-only" type="file" accept="video/*" onChange={handleMouthlessUpload} />
+                </label>
+              </div>
               {mouthlessUrl && (
                 <a className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white" href={mouthlessUrl} download="mouthless.webm">
                   <Download className="size-4" />
@@ -1028,36 +1376,151 @@ export default function Home() {
         )}
 
         {mode === "runtime" && (
-          <section className="mx-auto grid w-full max-w-[1560px] flex-1 grid-cols-[minmax(0,1fr)_420px] gap-4 px-5 py-4 max-lg:grid-cols-1">
-            <div className="grid min-h-[calc(100vh-132px)] place-items-center rounded-md border border-slate-200 bg-white">
-              <div className="text-center text-slate-500">
-                <Bot className="mx-auto mb-3 size-10 text-teal-600" />
-                <p className="font-semibold text-slate-800">PNGTuber表示エリア</p>
-                <p className="text-sm">口無し動画と口PNG合成は素材生成後に接続します</p>
+          <div 
+            className="relative w-full h-screen overflow-hidden bg-[#f7f8fb]"
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+          >
+            {mouthlessUrl ? (
+              <>
+                <div
+                  style={{
+                    transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
+                    transformOrigin: "center center",
+                    cursor: isDraggingVideo ? "grabbing" : "grab",
+                  }}
+                  className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none"
+                  onMouseDown={handleMouseDown}
+                  onWheel={handleWheel}
+                >
+                  <video
+                    ref={runtimeVideoRef}
+                    className="pointer-events-none max-w-4xl rounded-lg shadow-lg"
+                    src={mouthlessUrl}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                  />
+                  <canvas
+                    ref={runtimeCanvasRef}
+                    className="pointer-events-none absolute left-0 top-0 w-full h-full"
+                  />
+                </div>
+
+                {/* Chat Input Floating Form */}
+                <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-xl px-4 flex flex-col items-center gap-4">
+                  {/* Latest Reply Bubble */}
+                  {lastReply && (
+                    <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all">
+                      {lastReply}
+                    </div>
+                  )}
+
+                  <div className="w-full flex gap-2 rounded-full border border-slate-200 bg-white/95 p-1.5 shadow-lg backdrop-blur-sm">
+                    <input
+                      type="text"
+                      placeholder={openaiApiKey ? "チャットで話しかける..." : "設定画面で OpenAI API キーを設定してください"}
+                      value={chatInput}
+                      disabled={!openaiApiKey || isChatSending}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                          void sendChatMessage();
+                        }
+                      }}
+                      className="flex-1 bg-transparent px-4 py-2 text-sm text-slate-800 placeholder-slate-400 focus:outline-none disabled:cursor-not-allowed"
+                    />
+                    <button
+                      onClick={() => void sendChatMessage()}
+                      disabled={!chatInput.trim() || !openaiApiKey || isChatSending}
+                      className="rounded-full bg-teal-600 p-2.5 text-white shadow-md hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300 transition-all flex items-center justify-center"
+                    >
+                      <Send className="size-4" />
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center text-slate-500">
+                <Bot className="mb-3 size-10 text-teal-600" />
+                <p className="font-semibold text-slate-800">口無し動画が未生成です</p>
+                <p className="text-sm">「素材生成」タブで動画を解析・生成してください</p>
               </div>
-            </div>
-            <aside className="rounded-md border border-slate-200 bg-white p-4">
-              <PanelTitle icon={<Mic2 />} title="VOICEVOX連携" badge={voicevoxStatus} />
-              <label className="mt-4 grid gap-1 text-sm">
-                <span className="font-medium">接続先URL</span>
-                <input className="rounded-md border border-slate-200 px-3 py-2" value={voicevoxUrl} onChange={(event) => setVoicevoxUrl(event.target.value)} />
-              </label>
-              <button className="mt-3 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white" onClick={testVoicevox}>
-                接続テスト
-              </button>
-            </aside>
-          </section>
+            )}
+          </div>
         )}
 
         {mode === "settings" && (
-          <section className="mx-auto w-full max-w-5xl flex-1 px-5 py-4">
-            <div className="rounded-md border border-slate-200 bg-white p-5">
-              <PanelTitle icon={<Settings />} title="設定" badge="初期項目" />
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <SettingBlock title="OpenAI API" copy="Route Handler経由で接続する前提で、キー保存方針を次工程で実装します。" />
-                <SettingBlock title="VOICEVOX" copy="接続テストと話者取得は /api/voicevox/speakers を経由します。" />
-                <SettingBlock title="素材生成" copy="YOLO + HRNet worker、解析FPS、backend、速度モードを素材生成画面から操作できます。" />
-                <SettingBlock title="保存" copy="初期版はブラウザから直接ダウンロードします。" />
+          <section className="mx-auto w-full max-w-2xl flex-1 px-5 pt-24 pb-4">
+            <div className="rounded-md border border-slate-200 bg-white p-6 shadow-sm">
+              <PanelTitle icon={<Settings />} title="連携設定" badge="連携設定" />
+              
+              <div className="mt-6 space-y-6">
+                {/* OpenAI API Key */}
+                <div className="grid gap-2">
+                  <label className="text-sm font-semibold text-slate-800">OpenAI API キー</label>
+                  <input
+                    type="password"
+                    placeholder="sk-..."
+                    value={openaiApiKey}
+                    onChange={(e) => handleOpenaiKeyChange(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                  />
+                  <p className="text-xs text-slate-500">APIキーはブラウザの localStorage にのみ保存されます。</p>
+                </div>
+
+                {/* OpenAI Model */}
+                <div className="grid gap-2">
+                  <label className="text-sm font-semibold text-slate-800">OpenAI モデル</label>
+                  <select
+                    value={openaiModel}
+                    onChange={(e) => handleOpenaiModelChange(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm bg-white shadow-sm focus:border-teal-500 focus:outline-none"
+                  >
+                    {availableModels.map((model) => (
+                      <option key={model} value={model}>
+                        {model} {model === "gpt-4o-mini" ? "(推奨)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Aivis Speech URL */}
+                <div className="grid gap-2">
+                  <label className="text-sm font-semibold text-slate-800">Aivis Speech 接続先URL</label>
+                  <input
+                    type="text"
+                    placeholder="http://127.0.0.1:10101"
+                    value={aivisUrl}
+                    onChange={(e) => handleAivisUrlChange(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                  />
+                  <p className="text-xs text-slate-500">音声合成を行うサーバーのアドレスを指定します（Aivis Speech / VOICEVOX）。</p>
+                </div>
+
+                {/* Aivis Speech Speaker */}
+                <div className="grid gap-2">
+                  <label className="text-sm font-semibold text-slate-800">キャラクター音声（話者）</label>
+                  <select
+                    value={selectedSpeaker}
+                    onChange={(e) => handleSpeakerChange(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm bg-white shadow-sm focus:border-teal-500 focus:outline-none"
+                  >
+                    {speakers.length > 0 ? (
+                      speakers.map((sp: any) =>
+                        sp.styles.map((style: any) => (
+                          <option key={`${sp.speaker_uuid}-${style.id}`} value={style.id}>
+                            {sp.name} ({style.name})
+                          </option>
+                        ))
+                      )
+                    ) : (
+                      <option value="2">四国めたん (ノーマル) [接続待ち...]</option>
+                    )}
+                  </select>
+                </div>
               </div>
             </div>
           </section>
