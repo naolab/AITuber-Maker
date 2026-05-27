@@ -1,13 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const isLocalEndpoint = (endpoint: string) => {
-  try {
-    const url = new URL(endpoint);
-    return ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
-  } catch {
-    return false;
-  }
-};
+import { isLocalEndpoint, normalizeEndpoint } from "@/lib/server/local-endpoint";
 
 export async function GET(request: NextRequest) {
   const endpoint = request.nextUrl.searchParams.get("endpoint") ?? "http://127.0.0.1:50021";
@@ -17,7 +10,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const response = await fetch(`${endpoint.replace(/\/$/, "")}/speakers`, {
+    const response = await fetch(`${normalizeEndpoint(endpoint)}/speakers`, {
       cache: "no-store",
       signal: AbortSignal.timeout(5000),
     });

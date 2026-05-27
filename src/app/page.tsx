@@ -1,20 +1,10 @@
 "use client";
 
-import {
-  Activity,
-  Bot,
-  CircleStop,
-  Download,
-  FileJson,
-  Mic2,
-  Play,
-  Settings,
-  Sparkles,
-  Upload,
-  Video,
-  Wand2,
-} from "lucide-react";
-import { ChangeEvent, DragEvent, ReactElement, useEffect, useRef, useState } from "react";
+import { CSSProperties, ChangeEvent, DragEvent, PointerEvent, useCallback, useEffect, useRef, useState } from "react";
+
+import AppHeader from "@/app/components/AppHeader";
+import MaterialsMode from "@/app/components/MaterialsMode";
+import StreamingMode from "@/app/components/StreamingMode";
 
 import type { GeneratedSprite, Mode, MouthFrame, MouthlessCleanPlate, MouthlessMask, MouthTrack, Quad, SpeedMode, WorkerMessage } from "@/lib/materials";
 import {
@@ -56,6 +46,18 @@ type VideoElementWithFrameCallback = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void;
 };
 
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type MouthState = "closed" | "half" | "open" | "e" | "u";
+
+type VoicevoxSpeaker = {
+  name: string;
+  styles: Array<{ id: number; name: string }>;
+};
+
 const revokeObjectUrl = (url: string) => {
   if (url) URL.revokeObjectURL(url);
 };
@@ -70,8 +72,27 @@ const isImportableQuad = (value: unknown): value is Quad =>
       point.every((coordinate) => Number.isFinite(coordinate)),
   );
 
+const fitMediaBox = (width: number, height: number, aspectRatio: number): CSSProperties => {
+  if (width <= 0 || height <= 0 || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return { aspectRatio: "16 / 9", width: "100%" };
+  }
+
+  const fittedWidth = Math.max(1, Math.min(width, height * aspectRatio));
+  const fittedHeight = Math.max(1, Math.min(height, fittedWidth / aspectRatio));
+  return {
+    aspectRatio: String(aspectRatio),
+    height: `${Math.floor(fittedHeight)}px`,
+    width: `${Math.floor(fittedWidth)}px`,
+  };
+};
+
+const clampNumber = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("materials");
+  const [materialPreviewTab, setMaterialPreviewTab] = useState<"original" | "mouthless">("original");
+  const [isStreamingMenuOpen, setIsStreamingMenuOpen] = useState(true);
+  const [streamingVideoLayout, setStreamingVideoLayout] = useState({ x: 0, y: 0, width: 0, isPlaced: false });
   const [file, setFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState("");
   const [videoMeta, setVideoMeta] = useState({ width: 0, height: 0, duration: 0 });
@@ -94,9 +115,28 @@ export default function Home() {
   const [isGeneratingMouthless, setIsGeneratingMouthless] = useState(false);
   const [voicevoxUrl, setVoicevoxUrl] = useState("http://127.0.0.1:50021");
   const [voicevoxStatus, setVoicevoxStatus] = useState("未接続");
+  const [voicevoxSpeakers, setVoicevoxSpeakers] = useState<VoicevoxSpeaker[]>([]);
+  const [voicevoxSpeakerId, setVoicevoxSpeakerId] = useState(1);
+  const [openAiKey, setOpenAiKey] = useState("");
+  const [openAiModel, setOpenAiModel] = useState("gpt-5");
+  const [systemPrompt, setSystemPrompt] = useState("あなたは明るく自然に会話するAITuberです。返答は短めにしてください。");
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [, setRuntimeStatus] = useState("待機中");
+  const [isChatRunning, setIsChatRunning] = useState(false);
+  const [mouthState, setMouthState] = useState<MouthState>("closed");
+  const [runtimeFrame, setRuntimeFrame] = useState<MouthFrame | null>(null);
+  const [audioUrl, setAudioUrl] = useState("");
+  const [materialPreviewSize, setMaterialPreviewSize] = useState({ width: 0, height: 0 });
+  const [runtimePreviewSize, setRuntimePreviewSize] = useState({ width: 0, height: 0 });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const runtimeVideoRef = useRef<HTMLVideoElement | null>(null);
+  const runtimeCompositeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const materialPreviewRef = useRef<HTMLDivElement | null>(null);
+  const runtimePreviewRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const mouthImagesRef = useRef<Partial<Record<MouthState, HTMLImageElement>>>({});
   const workerRef = useRef<Worker | null>(null);
   const cancelRef = useRef(false);
   const framesRef = useRef<MouthFrame[]>([]);
@@ -107,6 +147,13 @@ export default function Home() {
   const downloadUrlRef = useRef("");
   const mouthSpriteUrlsRef = useRef<string[]>([]);
   const mouthlessUrlRef = useRef("");
+  const audioUrlRef = useRef("");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const lipSyncFrameRef = useRef(0);
+  const runtimeCompositeFrameRef = useRef(0);
+  const mouthStateRef = useRef<MouthState>("closed");
+  const streamingDragRef = useRef<null | { type: "move" | "resize"; startX: number; startY: number; originX: number; originY: number; originWidth: number }>(null);
 
   const setManagedVideoUrl = (nextUrl: string) => {
     revokeObjectUrl(videoUrlRef.current);
@@ -132,6 +179,12 @@ export default function Home() {
     setMouthlessUrl(nextUrl);
   };
 
+  const setManagedAudioUrl = (nextUrl: string) => {
+    revokeObjectUrl(audioUrlRef.current);
+    audioUrlRef.current = nextUrl;
+    setAudioUrl(nextUrl);
+  };
+
   const cancelScheduledFrameSync = () => {
     const videoWithCallback = videoRef.current as VideoElementWithFrameCallback | null;
     if (frameCallbackRef.current) {
@@ -143,6 +196,42 @@ export default function Home() {
       animationFrameRef.current = 0;
     }
   };
+
+  const getRuntimeTrackFrame = useCallback(() => {
+    const video = runtimeVideoRef.current;
+    const currentTrack = trackRef.current;
+    if (!video || !currentTrack?.frames.length) return null;
+    const frameIndex = Math.max(
+      0,
+      Math.min(currentTrack.frames.length - 1, Math.round(video.currentTime * currentTrack.fps)),
+    );
+    return currentTrack.frames[frameIndex] ?? null;
+  }, []);
+
+  const drawRuntimeMouthComposite = useCallback(() => {
+    const canvas = runtimeCompositeCanvasRef.current;
+    const context = canvas?.getContext("2d");
+    const currentTrack = trackRef.current;
+    if (!canvas || !context || !currentTrack) return;
+
+    if (canvas.width !== currentTrack.width || canvas.height !== currentTrack.height) {
+      canvas.width = currentTrack.width;
+      canvas.height = currentTrack.height;
+    }
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    const frame = getRuntimeTrackFrame();
+    const image =
+      mouthImagesRef.current[mouthStateRef.current] ??
+      mouthImagesRef.current.closed ??
+      mouthImagesRef.current.half ??
+      mouthImagesRef.current.open;
+    if (!frame?.valid || !frame.quad || !image?.complete) return;
+
+    context.imageSmoothingEnabled = true;
+    drawWarpedPatch(context, image, frame.quad, image.naturalWidth || image.width, image.naturalHeight || image.height);
+  }, [getRuntimeTrackFrame]);
 
   useEffect(() => {
     videoUrlRef.current = videoUrl;
@@ -161,8 +250,73 @@ export default function Home() {
   }, [mouthlessUrl]);
 
   useEffect(() => {
+    audioUrlRef.current = audioUrl;
+  }, [audioUrl]);
+
+  useEffect(() => {
     trackRef.current = track;
   }, [track]);
+
+  useEffect(() => {
+    const observe = (element: HTMLElement | null, setSize: (size: { width: number; height: number }) => void) => {
+      if (!element) return null;
+      const update = () => {
+        const rect = element.getBoundingClientRect();
+        setSize({ width: rect.width, height: rect.height });
+      };
+      const observer = new ResizeObserver(update);
+      observer.observe(element);
+      update();
+      return observer;
+    };
+
+    const materialObserver = observe(materialPreviewRef.current, setMaterialPreviewSize);
+    const runtimeObserver = observe(runtimePreviewRef.current, setRuntimePreviewSize);
+    return () => {
+      materialObserver?.disconnect();
+      runtimeObserver?.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    mouthStateRef.current = mouthState;
+    drawRuntimeMouthComposite();
+  }, [drawRuntimeMouthComposite, mouthState]);
+
+  useEffect(() => {
+    const video = runtimeVideoRef.current;
+    if (!video || !mouthlessUrl) return;
+    video.load();
+    video.play().catch(() => {});
+  }, [mouthlessUrl]);
+
+  useEffect(() => {
+    const nextImages: Partial<Record<MouthState, HTMLImageElement>> = {};
+    mouthSprites.forEach((sprite) => {
+      const image = new Image();
+      image.onload = drawRuntimeMouthComposite;
+      image.src = sprite.url;
+      nextImages[sprite.name] = image;
+    });
+    mouthImagesRef.current = nextImages;
+    drawRuntimeMouthComposite();
+  }, [drawRuntimeMouthComposite, mouthSprites]);
+
+  useEffect(() => {
+    if (mode !== "streaming" || !track || !mouthlessUrl || !mouthSprites.length) return;
+    const tick = () => {
+      drawRuntimeMouthComposite();
+      runtimeCompositeFrameRef.current = requestAnimationFrame(tick);
+    };
+    runtimeCompositeFrameRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (runtimeCompositeFrameRef.current) {
+        cancelAnimationFrame(runtimeCompositeFrameRef.current);
+        runtimeCompositeFrameRef.current = 0;
+      }
+    };
+  }, [drawRuntimeMouthComposite, mode, mouthSprites.length, mouthlessUrl, track]);
+
 
   useEffect(() => {
     return () => {
@@ -170,7 +324,12 @@ export default function Home() {
       revokeObjectUrl(downloadUrlRef.current);
       mouthSpriteUrlsRef.current.forEach(revokeObjectUrl);
       revokeObjectUrl(mouthlessUrlRef.current);
+      revokeObjectUrl(audioUrlRef.current);
       workerRef.current?.terminate();
+      audioSourceRef.current?.stop();
+      audioContextRef.current?.close();
+      if (lipSyncFrameRef.current) cancelAnimationFrame(lipSyncFrameRef.current);
+      if (runtimeCompositeFrameRef.current) cancelAnimationFrame(runtimeCompositeFrameRef.current);
       cancelScheduledFrameSync();
     };
   }, []);
@@ -191,6 +350,10 @@ export default function Home() {
     setMouthStatus("未生成");
     setManagedMouthlessUrl("");
     setMouthlessStatus("未生成");
+    setManagedAudioUrl("");
+    setRuntimeFrame(null);
+    setMouthState("closed");
+    setRuntimeStatus("待機中");
     setProgress(0);
     setStatus("動画メタデータを読み込み中");
   };
@@ -309,7 +472,9 @@ export default function Home() {
       setLoadedTrackName(jsonFile.name);
       setProgress(1);
       setStatus(`JSON読込完了: ${normalizedTrack.frames.length} frames`);
+      setRuntimeStatus("素材生成のJSONを引き継ぎ済み");
       setCurrentFrame(normalizedTrack.frames.find((frame) => frame.valid) ?? normalizedTrack.frames[0] ?? null);
+      setRuntimeFrame(normalizedTrack.frames.find((frame) => frame.valid) ?? normalizedTrack.frames[0] ?? null);
       window.requestAnimationFrame(() => updateFrameForCurrentTime(normalizedTrack));
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
@@ -490,9 +655,11 @@ export default function Home() {
       setTrack(nextTrack);
       setLoadedTrackName("");
       setCurrentFrame(frames.find((frame) => frame.valid) ?? frames[0] ?? null);
+      setRuntimeFrame(frames.find((frame) => frame.valid) ?? frames[0] ?? null);
       const blob = new Blob([JSON.stringify(nextTrack, null, 2)], { type: "application/json" });
       setManagedDownloadUrl(URL.createObjectURL(blob));
       setProgress(1);
+      setRuntimeStatus("素材生成のJSONを引き継ぎ済み");
       setStatus(
         `解析完了: ${rawFrames.filter((frame) => frame.valid).length}/${rawFrames.length} raw valid / 補間${
           processed.interpolatedCount + resampled.interpolatedCount
@@ -587,6 +754,8 @@ export default function Home() {
 
       setManagedMouthSprites(nextSprites);
       setMouthStatus(`完了 ${unifiedWidth}x${unifiedHeight}`);
+      setMouthState("closed");
+      setRuntimeStatus("素材生成の口PNGを引き継ぎ済み");
       return nextSprites;
     } catch (error) {
       nextSprites.forEach((sprite) => revokeObjectUrl(sprite.url));
@@ -775,6 +944,7 @@ export default function Home() {
         ),
       );
       setMouthlessStatus("WebM生成完了");
+      setRuntimeStatus("素材生成の口無し動画と口PNGを引き継ぎ済み");
       return true;
     } catch (error) {
       setMouthlessStatus(error instanceof Error ? error.message : "口無し動画生成に失敗しました");
@@ -812,300 +982,352 @@ export default function Home() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || "VOICEVOXへ接続できません");
+      const speakers = Array.isArray(data.speakers) ? (data.speakers as VoicevoxSpeaker[]) : [];
+      setVoicevoxSpeakers(speakers);
+      const firstStyle = speakers[0]?.styles?.[0];
+      if (firstStyle) setVoicevoxSpeakerId(firstStyle.id);
       setVoicevoxStatus(`接続OK: ${data.speakers?.length ?? 0} speakers`);
     } catch (error) {
       setVoicevoxStatus(error instanceof Error ? error.message : "接続に失敗しました");
     }
   };
 
+  const updateRuntimeFrameForCurrentTime = () => {
+    const frame = getRuntimeTrackFrame();
+    if (frame) setRuntimeFrame(frame);
+    drawRuntimeMouthComposite();
+  };
+
+  const loadRuntimeMouthlessFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = event.target.files?.[0];
+    if (nextFile) {
+      setManagedMouthlessUrl(URL.createObjectURL(nextFile));
+      setMouthlessStatus("外部動画を読込済み");
+      setRuntimeStatus("外部動画を引き継ぎ済み");
+    }
+    event.target.value = "";
+  };
+
+  const loadRuntimeMouthSprite = (name: MouthState) => (event: ChangeEvent<HTMLInputElement>) => {
+    const pngFile = event.target.files?.[0];
+    if (!pngFile) return;
+
+    const nextSprite: GeneratedSprite = {
+      name,
+      url: URL.createObjectURL(pngFile),
+      frameIndex: 0,
+      width: 0,
+      height: 0,
+    };
+    const nextSprites = [...mouthSprites.filter((sprite) => sprite.name !== name), nextSprite].sort(
+      (a, b) => mouthSpriteNames.indexOf(a.name) - mouthSpriteNames.indexOf(b.name),
+    );
+    setManagedMouthSprites(nextSprites);
+    setMouthStatus(`${name}.png 読込済み`);
+    setMouthState("closed");
+    setRuntimeStatus(`${name}.pngを読み込みました`);
+    event.target.value = "";
+  };
+
+  function clampStreamingLayout(x: number, y: number, width: number) {
+    const stageWidth = Math.max(1, runtimePreviewSize.width);
+    const stageHeight = Math.max(1, runtimePreviewSize.height);
+    const chatReserve = 88;
+    const maxWidth = Math.max(160, Math.min(stageWidth - 24, (stageHeight - chatReserve - 24) * runtimeAspectRatio));
+    const nextWidth = clampNumber(width || stageWidth * 0.42, 160, maxWidth);
+    const nextHeight = nextWidth / runtimeAspectRatio;
+    return {
+      width: nextWidth,
+      x: clampNumber(x, 12, stageWidth - nextWidth - 12),
+      y: clampNumber(y, 12, stageHeight - chatReserve - nextHeight - 12),
+    };
+  }
+
+  const startStreamingVideoMove = (event: PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("[data-resize-handle]")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    streamingDragRef.current = {
+      type: "move",
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: streamingVideoX,
+      originY: streamingVideoY,
+      originWidth: streamingVideoWidth,
+    };
+  };
+
+  const startStreamingVideoResize = (event: PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    streamingDragRef.current = {
+      type: "resize",
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: streamingVideoX,
+      originY: streamingVideoY,
+      originWidth: streamingVideoWidth,
+    };
+  };
+
+  const updateStreamingVideoDrag = (event: PointerEvent<HTMLElement>) => {
+    const drag = streamingDragRef.current;
+    if (!drag) return;
+    if (drag.type === "move") {
+      const next = clampStreamingLayout(
+        drag.originX + event.clientX - drag.startX,
+        drag.originY + event.clientY - drag.startY,
+        drag.originWidth,
+      );
+      setStreamingVideoLayout((current) => ({ ...current, ...next, isPlaced: true }));
+      return;
+    }
+    const next = clampStreamingLayout(drag.originX, drag.originY, drag.originWidth + event.clientX - drag.startX);
+    setStreamingVideoLayout((current) => ({ ...current, ...next, isPlaced: true }));
+  };
+
+  const stopStreamingVideoDrag = () => {
+    streamingDragRef.current = null;
+  };
+
+  const stopSpeech = () => {
+    audioSourceRef.current?.stop();
+    audioSourceRef.current = null;
+    if (lipSyncFrameRef.current) cancelAnimationFrame(lipSyncFrameRef.current);
+    lipSyncFrameRef.current = 0;
+    setMouthState("closed");
+    setRuntimeStatus("停止しました");
+  };
+
+  const playAudioWithLipSync = async (arrayBuffer: ArrayBuffer) => {
+    stopSpeech();
+    const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) throw new Error("このブラウザはWeb Audio APIに対応していません");
+    const audioContext = audioContextRef.current ?? new AudioContextClass();
+    audioContextRef.current = audioContext;
+    const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    const source = audioContext.createBufferSource();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 1024;
+    source.buffer = decoded;
+    source.connect(analyser);
+    analyser.connect(audioContext.destination);
+    audioSourceRef.current = source;
+
+    const samples = new Uint8Array(analyser.fftSize);
+    let smoothedRms = 0;
+    const tick = () => {
+      analyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (const value of samples) {
+        const normalized = (value - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      smoothedRms = smoothedRms * 0.72 + rms * 0.28;
+      setMouthState(smoothedRms > 0.09 ? "open" : smoothedRms > 0.035 ? "half" : "closed");
+      lipSyncFrameRef.current = requestAnimationFrame(tick);
+    };
+
+    source.onended = () => {
+      if (lipSyncFrameRef.current) cancelAnimationFrame(lipSyncFrameRef.current);
+      lipSyncFrameRef.current = 0;
+      audioSourceRef.current = null;
+      setMouthState("closed");
+      setRuntimeStatus("発話完了");
+    };
+
+    setRuntimeStatus("発話中");
+    source.start();
+    tick();
+  };
+
+  const synthesizeAndSpeak = async (text: string) => {
+    setRuntimeStatus("VOICEVOX音声生成中");
+    const response = await fetch("/api/voicevox/audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        endpoint: voicevoxUrl,
+        text,
+        speaker: voicevoxSpeakerId,
+      }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.error || "VOICEVOX音声生成に失敗しました");
+    }
+    const audioBuffer = await response.arrayBuffer();
+    setManagedAudioUrl(URL.createObjectURL(new Blob([audioBuffer], { type: "audio/wav" })));
+    await playAudioWithLipSync(audioBuffer);
+  };
+
+  const sendChat = async () => {
+    const userText = chatInput.trim();
+    if (!userText || isChatRunning) return;
+    const nextMessages: ChatMessage[] = [...chatMessages, { role: "user", content: userText }];
+    setChatInput("");
+    setChatMessages(nextMessages);
+    setIsChatRunning(true);
+    setRuntimeStatus("OpenAI応答生成中");
+
+    try {
+      const response = await fetch("/api/openai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: openAiKey,
+          model: openAiModel,
+          systemPrompt,
+          messages: nextMessages,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error || "OpenAI応答生成に失敗しました");
+      const assistantMessage: ChatMessage = { role: "assistant", content: data.text };
+      setChatMessages([...nextMessages, assistantMessage]);
+      await synthesizeAndSpeak(assistantMessage.content);
+    } catch (error) {
+      setRuntimeStatus(error instanceof Error ? error.message : "実行に失敗しました");
+    } finally {
+      setIsChatRunning(false);
+    }
+  };
+
   const currentQuad = currentFrame?.quad;
+  const runtimeMouthSprite = mouthSprites.find((sprite) => sprite.name === mouthState) ?? mouthSprites.find((sprite) => sprite.name === "closed") ?? mouthSprites[0];
+  const runtimeQuad = runtimeFrame?.quad ?? track?.frames.find((frame) => frame.valid)?.quad ?? null;
+  const runtimeAssetReady = Boolean(mouthlessUrl && mouthSprites.length && track);
+  const materialAspectRatio =
+    videoMeta.width && videoMeta.height ? videoMeta.width / videoMeta.height : track?.width && track.height ? track.width / track.height : 16 / 9;
+  const runtimeAspectRatio = track?.width && track?.height ? track.width / track.height : 16 / 9;
+  const defaultStreamingWidth = runtimePreviewSize.width > 0 ? runtimePreviewSize.width * 0.42 : 320;
+  const placedStreamingWidth = streamingVideoLayout.isPlaced ? streamingVideoLayout.width : defaultStreamingWidth;
+  const defaultStreamingX = runtimePreviewSize.width / 2 - placedStreamingWidth / 2;
+  const defaultStreamingY = (runtimePreviewSize.height - 88) / 2 - placedStreamingWidth / runtimeAspectRatio / 2;
+  const streamingDisplayLayout = clampStreamingLayout(
+    streamingVideoLayout.isPlaced ? streamingVideoLayout.x : defaultStreamingX,
+    streamingVideoLayout.isPlaced ? streamingVideoLayout.y : defaultStreamingY,
+    placedStreamingWidth,
+  );
+  const streamingVideoWidth = streamingDisplayLayout.width;
+  const streamingVideoX = streamingDisplayLayout.x;
+  const streamingVideoY = streamingDisplayLayout.y;
+  const materialVideoFrameStyle = fitMediaBox(
+    Math.max(0, materialPreviewSize.width - 32),
+    Math.max(0, materialPreviewSize.height - 80),
+    materialAspectRatio,
+  );
   const overlaySize = track
     ? { width: track.width, height: track.height }
     : { width: videoMeta.width, height: videoMeta.height };
 
   return (
-    <main className="min-h-screen bg-[#f7f8fb] text-[#1d2430]">
-      <div className="flex min-h-screen flex-col">
-        <header className="border-b border-slate-200 bg-white">
-          <div className="mx-auto flex max-w-[1560px] items-center justify-between px-5 py-3">
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md border border-slate-200 bg-slate-50">
-                <Sparkles className="size-5 text-teal-600" />
-              </div>
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">AITuber Maker</p>
-                <h1 className="text-lg font-semibold">素材生成ワークスペース</h1>
-              </div>
-            </div>
-            <nav className="flex rounded-md border border-slate-200 bg-slate-50 p-1">
-              <ModeButton active={mode === "materials"} icon={<Wand2 />} label="素材生成" onClick={() => setMode("materials")} />
-              <ModeButton active={mode === "runtime"} icon={<Bot />} label="AITuber実行" onClick={() => setMode("runtime")} />
-              <ModeButton active={mode === "settings"} icon={<Settings />} label="設定" onClick={() => setMode("settings")} />
-            </nav>
-          </div>
-        </header>
+    <main className="h-screen overflow-hidden bg-[var(--color-bg)] text-[var(--color-text)]">
+      <div className="grid h-full grid-rows-[56px_minmax(0,1fr)]">
+        <AppHeader mode={mode} onModeChange={setMode} />
 
         {mode === "materials" && (
-          <section className="mx-auto grid w-full max-w-[1560px] flex-1 grid-cols-[minmax(0,1fr)_390px] gap-4 px-5 py-4 max-lg:grid-cols-1">
-            <div className="min-w-0">
-              <div className={`relative grid min-h-[calc(100vh-132px)] overflow-auto rounded-md border border-slate-200 bg-white ${mouthlessUrl ? "place-items-start" : "place-items-center"}`}>
-                {videoUrl ? (
-                  <div className="mx-auto grid w-full max-w-4xl gap-4 p-4">
-                    <div className="min-w-0">
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">元動画</p>
-                      <div className="relative">
-                        <video
-                          ref={videoRef}
-                          className="aspect-video w-full bg-black object-contain"
-                          src={videoUrl}
-                          controls
-                          playsInline
-                          onLoadedMetadata={onMetadataLoaded}
-                          onTimeUpdate={() => updateFrameForCurrentTime()}
-                          onSeeked={() => updateFrameForCurrentTime()}
-                          onPlay={startTrackPlaybackSync}
-                          onPause={stopTrackPlaybackSync}
-                          onEnded={stopTrackPlaybackSync}
-                        />
-                        {currentQuad && overlaySize.width > 0 && (
-                          <svg className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${overlaySize.width} ${overlaySize.height}`} preserveAspectRatio="xMidYMid meet">
-                            <polygon points={currentQuad.map(([x, y]) => `${x},${y}`).join(" ")} className="fill-amber-300/20 stroke-amber-500" strokeWidth="3" vectorEffect="non-scaling-stroke" />
-                            <circle cx={currentQuad.reduce((sum, [x]) => sum + x, 0) / 4} cy={currentQuad.reduce((sum, [, y]) => sum + y, 0) / 4} r="5" className="fill-rose-500 stroke-white" vectorEffect="non-scaling-stroke" />
-                          </svg>
-                        )}
-                      </div>
-                    </div>
-                    {mouthlessUrl && (
-                      <div className="min-w-0">
-                        <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">口無し動画</p>
-                      <video
-                        className="aspect-video w-full bg-black object-contain"
-                        src={mouthlessUrl}
-                        controls
-                        playsInline
-                        loop
-                      />
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <label
-                    className={`m-5 grid min-h-[520px] w-[calc(100%-40px)] cursor-pointer place-items-center rounded-md border border-dashed text-center transition ${isDragging ? "border-teal-500 bg-teal-50" : "border-slate-300 bg-slate-50"}`}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      setIsDragging(true);
-                    }}
-                    onDragLeave={() => setIsDragging(false)}
-                    onDrop={handleDrop}
-                  >
-                    <input className="sr-only" type="file" accept="video/*" onChange={handleFileInput} />
-                    <span className="grid justify-items-center gap-3">
-                      <span className="grid size-14 place-items-center rounded-md bg-teal-600 text-white">
-                        <Upload className="size-7" />
-                      </span>
-                      <span className="text-3xl font-semibold">動画をアップロード</span>
-                      <span className="text-sm text-slate-500">MP4、WebM、MOV などを選択またはドラッグ</span>
-                    </span>
-                  </label>
-                )}
-                <canvas ref={canvasRef} className="hidden" />
-              </div>
-            </div>
-
-            <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto rounded-md border border-slate-200 bg-white p-4">
-              <PanelTitle icon={<Video />} title="入力動画" badge={status} />
-              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-3 text-sm font-semibold text-white">
-                <Upload className="size-4" />
-                動画を選ぶ
-                <input className="sr-only" type="file" accept="video/*" onChange={handleFileInput} />
-              </label>
-              <InfoGrid
-                items={[
-                  ["ファイル", file?.name ?? "未選択"],
-                  ["サイズ", videoMeta.width ? `${videoMeta.width} x ${videoMeta.height}` : "-"],
-                  ["長さ", videoMeta.duration ? formatTime(videoMeta.duration) : "-"],
-                ]}
-              />
-
-              <div className="h-px bg-slate-200" />
-              <PanelTitle icon={<Activity />} title="口追跡JSON生成" badge={isAnalyzing ? "実行中" : track ? "完了" : "待機"} />
-              <button
-                className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={!file || !videoMeta.width || isRunningAll || isAnalyzing || isExtractingMouth || isGeneratingMouthless}
-                onClick={runFullPipeline}
-              >
-                <Wand2 className="size-4" />
-                解析から成果物生成まで実行
-              </button>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">解析FPS</span>
-                <input className="rounded-md border border-slate-200 px-3 py-2" type="number" min="1" max="60" value={analysisFps} onChange={(event) => setAnalysisFps(Number(event.target.value) || 1)} />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">速度モード</span>
-                <select className="rounded-md border border-slate-200 px-3 py-2" value={speedMode} onChange={(event) => setSpeedMode(event.target.value as SpeedMode)}>
-                  {Object.entries(speedPresets).map(([value, preset]) => (
-                    <option key={value} value={value}>
-                      {preset.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="h-2 rounded-full bg-slate-100">
-                <div className="h-full rounded-full bg-teal-600 transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300" disabled={!file || !videoMeta.width || isAnalyzing || isRunningAll} onClick={() => void analyzeVideo()}>
-                  <Play className="size-4" />
-                  解析開始
-                </button>
-                <button className="flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:text-slate-400" disabled={!isAnalyzing} onClick={stopAnalysis}>
-                  <CircleStop className="size-4" />
-                  停止
-                </button>
-              </div>
-
-              <a
-                className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold ${downloadUrl ? "bg-slate-900 text-white" : "pointer-events-none bg-slate-100 text-slate-400"}`}
-                href={downloadUrl || undefined}
-                download="mouth_track.json"
-              >
-                <Download className="size-4" />
-                mouth_track.json 保存
-              </a>
-              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold">
-                <FileJson className="size-4" />
-                mouth_track.json 読込
-                <input className="sr-only" type="file" accept="application/json,.json" onChange={loadTrackJson} />
-              </label>
-              {loadedTrackName && <p className="truncate text-xs text-slate-500">読込中: {loadedTrackName}</p>}
-
-              <div className="h-px bg-slate-200" />
-              <PanelTitle icon={<FileJson />} title="口PNG差分" badge={mouthStatus} />
-              <button
-                className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={!track || !videoUrl || isExtractingMouth || isRunningAll}
-                onClick={() => void extractMouthSprites()}
-              >
-                <Play className="size-4" />
-                5種を自動抽出
-              </button>
-              {mouthSprites.length > 0 && (
-                <div className="grid grid-cols-5 gap-2">
-                  {mouthSprites.map((sprite) => (
-                    <a
-                      className="grid gap-1 rounded-md border border-slate-200 bg-slate-50 p-2 text-center text-xs font-medium"
-                      download={`${sprite.name}.png`}
-                      href={sprite.url}
-                      key={sprite.name}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img className="aspect-square w-full rounded bg-white object-contain" src={sprite.url} alt={`${sprite.name} mouth`} />
-                      <span>{sprite.name}</span>
-                    </a>
-                  ))}
-                </div>
-              )}
-
-              <div className="h-px bg-slate-200" />
-              <PanelTitle icon={<Video />} title="口無し動画" badge={mouthlessStatus} />
-              <button
-                className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={!track || !videoUrl || isGeneratingMouthless || isRunningAll}
-                onClick={() => void generateMouthlessVideo()}
-              >
-                <Play className="size-4" />
-                口無しWebM生成
-              </button>
-              {mouthlessUrl && (
-                <a className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white" href={mouthlessUrl} download="mouthless.webm">
-                  <Download className="size-4" />
-                  mouthless.webm 保存
-                </a>
-              )}
-            </aside>
-          </section>
+          <MaterialsMode
+            videoRef={videoRef}
+            canvasRef={canvasRef}
+            materialPreviewRef={materialPreviewRef}
+            file={file}
+            videoUrl={videoUrl}
+            videoMeta={videoMeta}
+            materialPreviewTab={materialPreviewTab}
+            onPreviewTabChange={setMaterialPreviewTab}
+            isDragging={isDragging}
+            onDragStateChange={setIsDragging}
+            onDrop={handleDrop}
+            onFileInput={handleFileInput}
+            onMetadataLoaded={onMetadataLoaded}
+            onTimeUpdate={() => updateFrameForCurrentTime()}
+            onSeeked={() => updateFrameForCurrentTime()}
+            onPlay={startTrackPlaybackSync}
+            onPause={stopTrackPlaybackSync}
+            onEnded={stopTrackPlaybackSync}
+            currentQuad={currentQuad}
+            overlaySize={overlaySize}
+            videoFrameStyle={materialVideoFrameStyle}
+            status={status}
+            progress={progress}
+            track={track}
+            downloadUrl={downloadUrl}
+            loadedTrackName={loadedTrackName}
+            mouthSprites={mouthSprites}
+            mouthStatus={mouthStatus}
+            mouthlessUrl={mouthlessUrl}
+            mouthlessStatus={mouthlessStatus}
+            analysisFps={analysisFps}
+            speedMode={speedMode}
+            isAnalyzing={isAnalyzing}
+            isRunningAll={isRunningAll}
+            isExtractingMouth={isExtractingMouth}
+            isGeneratingMouthless={isGeneratingMouthless}
+            onAnalysisFpsChange={setAnalysisFps}
+            onSpeedModeChange={setSpeedMode}
+            onRunFullPipeline={runFullPipeline}
+            onAnalyze={() => void analyzeVideo()}
+            onStopAnalysis={stopAnalysis}
+            onExtractMouth={() => void extractMouthSprites()}
+            onGenerateMouthless={() => void generateMouthlessVideo()}
+            onLoadTrackJson={loadTrackJson}
+          />
         )}
 
-        {mode === "runtime" && (
-          <section className="mx-auto grid w-full max-w-[1560px] flex-1 grid-cols-[minmax(0,1fr)_420px] gap-4 px-5 py-4 max-lg:grid-cols-1">
-            <div className="grid min-h-[calc(100vh-132px)] place-items-center rounded-md border border-slate-200 bg-white">
-              <div className="text-center text-slate-500">
-                <Bot className="mx-auto mb-3 size-10 text-teal-600" />
-                <p className="font-semibold text-slate-800">PNGTuber表示エリア</p>
-                <p className="text-sm">口無し動画と口PNG合成は素材生成後に接続します</p>
-              </div>
-            </div>
-            <aside className="rounded-md border border-slate-200 bg-white p-4">
-              <PanelTitle icon={<Mic2 />} title="VOICEVOX連携" badge={voicevoxStatus} />
-              <label className="mt-4 grid gap-1 text-sm">
-                <span className="font-medium">接続先URL</span>
-                <input className="rounded-md border border-slate-200 px-3 py-2" value={voicevoxUrl} onChange={(event) => setVoicevoxUrl(event.target.value)} />
-              </label>
-              <button className="mt-3 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white" onClick={testVoicevox}>
-                接続テスト
-              </button>
-            </aside>
-          </section>
-        )}
-
-        {mode === "settings" && (
-          <section className="mx-auto w-full max-w-5xl flex-1 px-5 py-4">
-            <div className="rounded-md border border-slate-200 bg-white p-5">
-              <PanelTitle icon={<Settings />} title="設定" badge="初期項目" />
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <SettingBlock title="OpenAI API" copy="Route Handler経由で接続する前提で、キー保存方針を次工程で実装します。" />
-                <SettingBlock title="VOICEVOX" copy="接続テストと話者取得は /api/voicevox/speakers を経由します。" />
-                <SettingBlock title="素材生成" copy="YOLO + HRNet worker、解析FPS、backend、速度モードを素材生成画面から操作できます。" />
-                <SettingBlock title="保存" copy="初期版はブラウザから直接ダウンロードします。" />
-              </div>
-            </div>
-          </section>
+        {mode === "streaming" && (
+          <StreamingMode
+            runtimePreviewRef={runtimePreviewRef}
+            runtimeVideoRef={runtimeVideoRef}
+            runtimeCompositeCanvasRef={runtimeCompositeCanvasRef}
+            mouthlessUrl={mouthlessUrl}
+            runtimeAspectRatio={runtimeAspectRatio}
+            streamingVideoX={streamingVideoX}
+            streamingVideoY={streamingVideoY}
+            streamingVideoWidth={streamingVideoWidth}
+            track={track}
+            mouthState={mouthState}
+            mouthSprites={mouthSprites}
+            runtimeQuad={runtimeQuad}
+            runtimeMouthSprite={runtimeMouthSprite}
+            onPointerDown={startStreamingVideoMove}
+            onPointerMove={updateStreamingVideoDrag}
+            onPointerUp={stopStreamingVideoDrag}
+            onResizeDown={startStreamingVideoResize}
+            onRuntimeMetadataLoaded={updateRuntimeFrameForCurrentTime}
+            onRuntimeTimeUpdate={updateRuntimeFrameForCurrentTime}
+            isStreamingMenuOpen={isStreamingMenuOpen}
+            onToggleMenu={() => setIsStreamingMenuOpen((c) => !c)}
+            runtimeAssetReady={runtimeAssetReady}
+            onLoadMouthlessFile={loadRuntimeMouthlessFile}
+            onLoadTrackJson={loadTrackJson}
+            onLoadMouthSprite={loadRuntimeMouthSprite}
+            voicevoxUrl={voicevoxUrl}
+            voicevoxStatus={voicevoxStatus}
+            voicevoxSpeakers={voicevoxSpeakers}
+            voicevoxSpeakerId={voicevoxSpeakerId}
+            onVoicevoxUrlChange={setVoicevoxUrl}
+            onVoicevoxSpeakerChange={setVoicevoxSpeakerId}
+            onTestVoicevox={testVoicevox}
+            openAiKey={openAiKey}
+            openAiModel={openAiModel}
+            systemPrompt={systemPrompt}
+            chatInput={chatInput}
+            chatMessages={chatMessages}
+            isChatRunning={isChatRunning}
+            audioUrl={audioUrl}
+            onOpenAiKeyChange={setOpenAiKey}
+            onOpenAiModelChange={setOpenAiModel}
+            onSystemPromptChange={setSystemPrompt}
+            onChatInputChange={setChatInput}
+            onSendChat={() => void sendChat()}
+            onStopSpeech={stopSpeech}
+            onClearChat={() => setChatMessages([])}
+          />
         )}
       </div>
     </main>
   );
 }
 
-function ModeButton({ active, icon, label, onClick }: { active: boolean; icon: ReactElement; label: string; onClick: () => void }) {
-  return (
-    <button className={`flex items-center gap-2 rounded px-3 py-2 text-sm font-medium ${active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`} onClick={onClick}>
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function PanelTitle({ icon, title, badge }: { icon: ReactElement; title: string; badge: string }) {
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <div className="flex items-center gap-2">
-        <span className="grid size-8 place-items-center rounded-md bg-slate-100 text-slate-700">{icon}</span>
-        <h2 className="font-semibold">{title}</h2>
-      </div>
-      <span className="max-w-44 truncate rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">{badge}</span>
-    </div>
-  );
-}
-
-function InfoGrid({ items }: { items: Array<[string, string]> }) {
-  return (
-    <dl className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
-      {items.map(([label, value]) => (
-        <div className="grid grid-cols-[90px_minmax(0,1fr)] gap-2" key={label}>
-          <dt className="text-slate-500">{label}</dt>
-          <dd className="truncate font-medium">{value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-function SettingBlock({ title, copy }: { title: string; copy: string }) {
-  return (
-    <section className="rounded-md border border-slate-200 bg-slate-50 p-4">
-      <h3 className="font-semibold">{title}</h3>
-      <p className="mt-2 text-sm leading-6 text-slate-600">{copy}</p>
-    </section>
-  );
-}
