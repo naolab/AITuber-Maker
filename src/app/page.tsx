@@ -6,6 +6,7 @@ import {
   CircleStop,
   Download,
   FileJson,
+  Image,
   Mic2,
   Play,
   Radio,
@@ -105,6 +106,7 @@ export default function Home() {
     "gpt-4-turbo",
     "gpt-3.5-turbo",
   ]);
+  const [ttsType, setTtsType] = useState<"aivis" | "voicevox" | "custom">("aivis");
   const [aivisUrl, setAivisUrl] = useState("http://127.0.0.1:10101");
   const [selectedSpeaker, setSelectedSpeaker] = useState("2");
   const [speakers, setSpeakers] = useState<any[]>([]);
@@ -112,16 +114,28 @@ export default function Home() {
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
 
+  const [runtimeBgType, setRuntimeBgType] = useState<"color" | "image">("color");
+  const [runtimeBgColor, setRuntimeBgColor] = useState("#f7f8fb");
+  const [runtimeBgImageUrl, setRuntimeBgImageUrl] = useState("");
+  const runtimeBgImageUrlRef = useRef("");
+
   // Load settings on mount
   useEffect(() => {
     const key = localStorage.getItem("openai_api_key") || "";
     const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
+    const tts = localStorage.getItem("tts_type") as "aivis" | "voicevox" | "custom" || "aivis";
     const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
     const speaker = localStorage.getItem("aivis_speaker") || "2";
+    const bgType = localStorage.getItem("runtime_bg_type") as "color" | "image" || "color";
+    const bgColor = localStorage.getItem("runtime_bg_color") || "#f7f8fb";
+
     setOpenaiApiKey(key);
     setOpenaiModel(model);
+    setTtsType(tts);
     setAivisUrl(url);
     setSelectedSpeaker(speaker);
+    setRuntimeBgType(bgType === "image" ? "color" : bgType); // image needs manual upload each session
+    setRuntimeBgColor(bgColor);
 
     if (url) {
       void fetchSpeakers(url);
@@ -181,6 +195,24 @@ export default function Home() {
   const handleOpenaiModelChange = (model: string) => {
     setOpenaiModel(model);
     localStorage.setItem("openai_model", model);
+  };
+
+  const handleTtsTypeChange = (type: "aivis" | "voicevox" | "custom") => {
+    setTtsType(type);
+    localStorage.setItem("tts_type", type);
+    
+    let targetUrl = aivisUrl;
+    if (type === "aivis") {
+      targetUrl = "http://127.0.0.1:10101";
+    } else if (type === "voicevox") {
+      targetUrl = "http://127.0.0.1:50021";
+    }
+    
+    if (type !== "custom") {
+      setAivisUrl(targetUrl);
+      localStorage.setItem("aivis_url", targetUrl);
+      void fetchSpeakers(targetUrl);
+    }
   };
 
   const handleAivisUrlChange = (url: string) => {
@@ -368,7 +400,7 @@ export default function Home() {
       if (sprite) {
         let img = runtimeImageCacheRef.current[sprite.url];
         if (!img) {
-          img = new Image();
+          img = new window.Image();
           img.src = sprite.url;
           runtimeImageCacheRef.current[sprite.url] = img;
         }
@@ -445,6 +477,14 @@ export default function Home() {
   const handleMouthlessUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
+      const isChromeVideo = file.type === "video/webm" || 
+                            file.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(file.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        event.target.value = "";
+        return;
+      }
       const url = URL.createObjectURL(file);
       setManagedMouthlessUrl(url);
       setMouthlessStatus("アップロード完了");
@@ -509,10 +549,30 @@ export default function Home() {
       revokeObjectUrl(downloadUrlRef.current);
       mouthSpriteUrlsRef.current.forEach(revokeObjectUrl);
       revokeObjectUrl(mouthlessUrlRef.current);
+      revokeObjectUrl(runtimeBgImageUrlRef.current);
       workerRef.current?.terminate();
       cancelScheduledFrameSync();
     };
   }, []);
+
+  const handleBgImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      revokeObjectUrl(runtimeBgImageUrlRef.current);
+      const url = URL.createObjectURL(file);
+      runtimeBgImageUrlRef.current = url;
+      setRuntimeBgImageUrl(url);
+      setRuntimeBgType("image");
+      localStorage.setItem("runtime_bg_type", "image");
+    }
+  };
+
+  const handleBgColorChange = (color: string) => {
+    setRuntimeBgColor(color);
+    setRuntimeBgType("color");
+    localStorage.setItem("runtime_bg_type", "color");
+    localStorage.setItem("runtime_bg_color", color);
+  };
 
   const loadVideoFile = (nextFile: File) => {
     cancelScheduledFrameSync();
@@ -536,14 +596,33 @@ export default function Home() {
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0];
-    if (nextFile) loadVideoFile(nextFile);
+    if (nextFile) {
+      const isChromeVideo = nextFile.type === "video/webm" || 
+                            nextFile.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(nextFile.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        event.target.value = "";
+        return;
+      }
+      loadVideoFile(nextFile);
+    }
   };
 
   const handleDrop = (event: DragEvent<HTMLLabelElement>) => {
     event.preventDefault();
     setIsDragging(false);
     const nextFile = event.dataTransfer.files?.[0];
-    if (nextFile?.type.startsWith("video/")) loadVideoFile(nextFile);
+    if (nextFile) {
+      const isChromeVideo = nextFile.type === "video/webm" || 
+                            nextFile.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(nextFile.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        return;
+      }
+      loadVideoFile(nextFile);
+    }
   };
 
   const onMetadataLoaded = () => {
@@ -1228,13 +1307,13 @@ export default function Home() {
                     onDragLeave={() => setIsDragging(false)}
                     onDrop={handleDrop}
                   >
-                    <input className="sr-only" type="file" accept="video/*" onChange={handleFileInput} />
+                    <input className="sr-only" type="file" accept=".mp4,.webm" onChange={handleFileInput} />
                     <span className="grid justify-items-center gap-3">
                       <span className="grid size-14 place-items-center rounded-md bg-teal-600 text-white">
                         <Upload className="size-7" />
                       </span>
                       <span className="text-3xl font-semibold">動画をアップロード</span>
-                      <span className="text-sm text-slate-500">MP4、WebM、MOV などを選択またはドラッグ</span>
+                      <span className="text-sm text-slate-500">MP4、WebM を選択またはドラッグ</span>
                     </span>
                   </label>
                 )}
@@ -1247,12 +1326,12 @@ export default function Home() {
               <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-3 text-sm font-semibold text-white">
                 <Upload className="size-4" />
                 動画を選ぶ
-                <input className="sr-only" type="file" accept="video/*" onChange={handleFileInput} />
+                <input className="sr-only" type="file" accept=".mp4,.webm" onChange={handleFileInput} />
               </label>
 
 
               <div className="h-px bg-slate-200" />
-              <PanelTitle icon={<Activity />} title="口追跡JSON生成" badge={isAnalyzing ? "実行中" : track ? "完了" : "待機"} />
+              <PanelTitle icon={<FileJson />} title="口追跡JSON生成" badge={isAnalyzing ? "実行中" : track ? "完了" : "待機"} />
               <button
                 className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
                 disabled={!file || !videoMeta.width || isRunningAll || isAnalyzing || isExtractingMouth || isGeneratingMouthless}
@@ -1305,7 +1384,7 @@ export default function Home() {
               {loadedTrackName && <p className="truncate text-xs text-slate-500">読込中: {loadedTrackName}</p>}
 
               <div className="h-px bg-slate-200" />
-              <PanelTitle icon={<FileJson />} title="口PNG差分" badge={mouthStatus} />
+              <PanelTitle icon={<Image />} title="口PNG差分" badge={mouthStatus} />
               <button
                 className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
                 disabled={!track || !videoUrl || isExtractingMouth || isRunningAll}
@@ -1362,7 +1441,7 @@ export default function Home() {
                 <label className="flex-1 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition">
                   <Upload className="size-4" />
                   動画をアップ
-                  <input className="sr-only" type="file" accept="video/*" onChange={handleMouthlessUpload} />
+                  <input className="sr-only" type="file" accept=".mp4,.webm" onChange={handleMouthlessUpload} />
                 </label>
               </div>
               {mouthlessUrl && (
@@ -1377,78 +1456,81 @@ export default function Home() {
 
         {mode === "runtime" && (
           <div 
-            className="relative w-full h-screen overflow-hidden bg-[#f7f8fb]"
+            className="relative w-full h-screen overflow-hidden"
+            style={
+              runtimeBgType === "image" && runtimeBgImageUrl
+                ? {
+                    backgroundImage: `url(${runtimeBgImageUrl})`,
+                    backgroundSize: "cover",
+                    backgroundPosition: "center",
+                  }
+                : {
+                    backgroundColor: runtimeBgColor,
+                  }
+            }
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
           >
-            {mouthlessUrl ? (
-              <>
-                <div
-                  style={{
-                    transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
-                    transformOrigin: "center center",
-                    cursor: isDraggingVideo ? "grabbing" : "grab",
-                  }}
-                  className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none"
-                  onMouseDown={handleMouseDown}
-                  onWheel={handleWheel}
-                >
-                  <video
-                    ref={runtimeVideoRef}
-                    className="pointer-events-none max-w-4xl rounded-lg shadow-lg"
-                    src={mouthlessUrl}
-                    autoPlay
-                    loop
-                    muted
-                    playsInline
-                  />
-                  <canvas
-                    ref={runtimeCanvasRef}
-                    className="pointer-events-none absolute left-0 top-0 w-full h-full"
-                  />
-                </div>
-
-                {/* Chat Input Floating Form */}
-                <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-xl px-4 flex flex-col items-center gap-4">
-                  {/* Latest Reply Bubble */}
-                  {lastReply && (
-                    <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all">
-                      {lastReply}
-                    </div>
-                  )}
-
-                  <div className="w-full flex gap-2 rounded-full border border-slate-200 bg-white/95 p-1.5 shadow-lg backdrop-blur-sm">
-                    <input
-                      type="text"
-                      placeholder={openaiApiKey ? "チャットで話しかける..." : "設定画面で OpenAI API キーを設定してください"}
-                      value={chatInput}
-                      disabled={!openaiApiKey || isChatSending}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                          void sendChatMessage();
-                        }
-                      }}
-                      className="flex-1 bg-transparent px-4 py-2 text-sm text-slate-800 placeholder-slate-400 focus:outline-none disabled:cursor-not-allowed"
-                    />
-                    <button
-                      onClick={() => void sendChatMessage()}
-                      disabled={!chatInput.trim() || !openaiApiKey || isChatSending}
-                      className="rounded-full bg-teal-600 p-2.5 text-white shadow-md hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300 transition-all flex items-center justify-center"
-                    >
-                      <Send className="size-4" />
-                    </button>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center text-slate-500">
-                <Bot className="mb-3 size-10 text-teal-600" />
-                <p className="font-semibold text-slate-800">口無し動画が未生成です</p>
-                <p className="text-sm">「素材生成」タブで動画を解析・生成してください</p>
+            {mouthlessUrl && (
+              <div
+                style={{
+                  transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
+                  transformOrigin: "center center",
+                  cursor: isDraggingVideo ? "grabbing" : "grab",
+                }}
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none"
+                onMouseDown={handleMouseDown}
+                onWheel={handleWheel}
+              >
+                <video
+                  ref={runtimeVideoRef}
+                  className="pointer-events-none max-w-4xl"
+                  src={mouthlessUrl}
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                />
+                <canvas
+                  ref={runtimeCanvasRef}
+                  className="pointer-events-none absolute left-0 top-0 w-full h-full"
+                />
               </div>
             )}
+
+            {/* Chat Input Floating Form */}
+            <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 flex flex-col items-center gap-4">
+              {/* Latest Reply Bubble */}
+              {lastReply && (
+                <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all">
+                  {lastReply}
+                </div>
+              )}
+
+              <div className="w-full flex gap-2 rounded-full border border-slate-200 bg-white/95 p-1.5 shadow-lg backdrop-blur-sm">
+                <input
+                  type="text"
+                  placeholder={openaiApiKey ? "チャットで話しかける..." : "設定画面で OpenAI API キーを設定してください"}
+                  value={chatInput}
+                  disabled={!openaiApiKey || isChatSending}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                      void sendChatMessage();
+                    }
+                  }}
+                  className="flex-1 bg-transparent px-4 py-2 text-sm text-slate-800 placeholder-slate-400 focus:outline-none disabled:cursor-not-allowed"
+                />
+                <button
+                  onClick={() => void sendChatMessage()}
+                  disabled={!chatInput.trim() || !openaiApiKey || isChatSending}
+                  className="rounded-full bg-teal-600 p-2.5 text-white shadow-md hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300 transition-all flex items-center justify-center"
+                >
+                  <Send className="size-4" />
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -1487,18 +1569,60 @@ export default function Home() {
                   </select>
                 </div>
 
-                {/* Aivis Speech URL */}
+                {/* Voice Synthesis Engine Selection */}
                 <div className="grid gap-2">
-                  <label className="text-sm font-semibold text-slate-800">Aivis Speech 接続先URL</label>
-                  <input
-                    type="text"
-                    placeholder="http://127.0.0.1:10101"
-                    value={aivisUrl}
-                    onChange={(e) => handleAivisUrlChange(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
-                  />
-                  <p className="text-xs text-slate-500">音声合成を行うサーバーのアドレスを指定します（Aivis Speech / VOICEVOX）。</p>
+                  <label className="text-sm font-semibold text-slate-800">音声合成エンジン</label>
+                  <div className="flex rounded-md border border-slate-200 bg-slate-50 p-1 w-fit">
+                    <button
+                      type="button"
+                      onClick={() => handleTtsTypeChange("aivis")}
+                      className={`rounded px-3 py-1.5 text-xs font-medium ${
+                        ttsType === "aivis"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      Aivis Speech
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleTtsTypeChange("voicevox")}
+                      className={`rounded px-3 py-1.5 text-xs font-medium ${
+                        ttsType === "voicevox"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      VOICEVOX
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleTtsTypeChange("custom")}
+                      className={`rounded px-3 py-1.5 text-xs font-medium ${
+                        ttsType === "custom"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      カスタム
+                    </button>
+                  </div>
                 </div>
+
+                {/* Aivis Speech / VOICEVOX URL (Visible only when 'custom' is selected) */}
+                {ttsType === "custom" && (
+                  <div className="grid gap-2">
+                    <label className="text-sm font-semibold text-slate-800">接続先URL</label>
+                    <input
+                      type="text"
+                      placeholder="http://127.0.0.1:10101"
+                      value={aivisUrl}
+                      onChange={(e) => handleAivisUrlChange(e.target.value)}
+                      className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                    />
+                    <p className="text-xs text-slate-500">カスタム接続先アドレスを指定します。</p>
+                  </div>
+                )}
 
                 {/* Aivis Speech Speaker */}
                 <div className="grid gap-2">
@@ -1520,6 +1644,107 @@ export default function Home() {
                       <option value="2">四国めたん (ノーマル) [接続待ち...]</option>
                     )}
                   </select>
+                </div>
+
+                {/* Runtime Background settings */}
+                <div className="h-px bg-slate-200 my-4" />
+                
+                <div className="grid gap-4">
+                  <label className="text-sm font-semibold text-slate-800">配信モードの背景</label>
+                  
+                  {/* Selector between Color and Image */}
+                  <div className="flex rounded-md border border-slate-200 bg-slate-50 p-1 w-fit">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRuntimeBgType("color");
+                        localStorage.setItem("runtime_bg_type", "color");
+                      }}
+                      className={`rounded px-3 py-1.5 text-xs font-medium ${
+                        runtimeBgType === "color"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      単色背景
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRuntimeBgType("image");
+                        localStorage.setItem("runtime_bg_type", "image");
+                      }}
+                      className={`rounded px-3 py-1.5 text-xs font-medium ${
+                        runtimeBgType === "image"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      背景画像
+                    </button>
+                  </div>
+
+                  {runtimeBgType === "color" ? (
+                    <div className="grid gap-3">
+                      {/* Presets */}
+                      <div className="flex gap-2">
+                        {[
+                          ["#f7f8fb", "標準"],
+                          ["#00ff00", "グリーンバック"],
+                          ["#ffffff", "ホワイト"],
+                          ["#000000", "ブラック"],
+                        ].map(([color, name]) => (
+                          <button
+                            key={color}
+                            type="button"
+                            onClick={() => handleBgColorChange(color)}
+                            className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium shadow-sm hover:bg-slate-50"
+                          >
+                            <span
+                              className="size-3.5 rounded-full border border-slate-300"
+                              style={{ backgroundColor: color }}
+                            />
+                            {name}
+                          </button>
+                        ))}
+                      </div>
+                      
+                      {/* Custom Color Picker */}
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={runtimeBgColor}
+                          onChange={(e) => handleBgColorChange(e.target.value)}
+                          className="size-8 cursor-pointer rounded border border-slate-200"
+                        />
+                        <span className="text-xs text-slate-500">カスタムカラーを選択</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid gap-2">
+                      <label className="flex max-w-sm cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-100/50 transition">
+                        <Upload className="size-4" />
+                        背景画像をアップロード
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="sr-only"
+                          onChange={handleBgImageUpload}
+                        />
+                      </label>
+                      {runtimeBgImageUrl && (
+                        <div className="mt-2 max-w-xs relative rounded-md border border-slate-200 bg-slate-50 p-2">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={runtimeBgImageUrl}
+                            alt="Background Preview"
+                            className="aspect-video w-full rounded object-cover"
+                          />
+                          <p className="mt-1 text-center text-[10px] text-slate-500 truncate">アップロード完了</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
