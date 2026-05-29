@@ -8,7 +8,9 @@ import {
   FileJson,
   Image,
   Mic2,
+  Minus,
   Play,
+  Plus,
   Radio,
   Send,
   Settings,
@@ -59,6 +61,25 @@ type VideoElementWithFrameCallback = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void;
 };
 
+type OpenAiModelsResponse = {
+  data?: Array<{ id: string }>;
+};
+
+type AivisSpeakerStyle = {
+  id: number;
+  name: string;
+};
+
+type AivisSpeaker = {
+  name: string;
+  speaker_uuid?: string;
+  styles: AivisSpeakerStyle[];
+};
+
+type WindowWithWebkitAudio = Window & {
+  webkitAudioContext?: typeof AudioContext;
+};
+
 const revokeObjectUrl = (url: string) => {
   if (url) URL.revokeObjectURL(url);
 };
@@ -75,6 +96,7 @@ const isImportableQuad = (value: unknown): value is Quad =>
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("materials");
+  const [isHeaderVisible, setIsHeaderVisible] = useState(true);
   const [file, setFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState("");
   const [videoMeta, setVideoMeta] = useState({ width: 0, height: 0, duration: 0 });
@@ -109,7 +131,7 @@ export default function Home() {
   const [ttsType, setTtsType] = useState<"aivis" | "voicevox" | "custom">("aivis");
   const [aivisUrl, setAivisUrl] = useState("http://127.0.0.1:10101");
   const [selectedSpeaker, setSelectedSpeaker] = useState("2");
-  const [speakers, setSpeakers] = useState<any[]>([]);
+  const [speakers, setSpeakers] = useState<AivisSpeaker[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
@@ -118,33 +140,6 @@ export default function Home() {
   const [runtimeBgColor, setRuntimeBgColor] = useState("#f7f8fb");
   const [runtimeBgImageUrl, setRuntimeBgImageUrl] = useState("");
   const runtimeBgImageUrlRef = useRef("");
-
-  // Load settings on mount
-  useEffect(() => {
-    const key = localStorage.getItem("openai_api_key") || "";
-    const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
-    const tts = localStorage.getItem("tts_type") as "aivis" | "voicevox" | "custom" || "aivis";
-    const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
-    const speaker = localStorage.getItem("aivis_speaker") || "2";
-    const bgType = localStorage.getItem("runtime_bg_type") as "color" | "image" || "color";
-    const bgColor = localStorage.getItem("runtime_bg_color") || "#f7f8fb";
-
-    setOpenaiApiKey(key);
-    setOpenaiModel(model);
-    setTtsType(tts);
-    setAivisUrl(url);
-    setSelectedSpeaker(speaker);
-    setRuntimeBgType(bgType === "image" ? "color" : bgType); // image needs manual upload each session
-    setRuntimeBgColor(bgColor);
-
-    if (url) {
-      void fetchSpeakers(url);
-    }
-    if (key) {
-      void fetchOpenaiModels(key);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const fetchOpenaiModels = async (key: string) => {
     if (!key) return;
@@ -155,10 +150,10 @@ export default function Home() {
         },
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as OpenAiModelsResponse;
         // Filter chat models (starts with gpt-) and exclude vision/instruct specific variants for simplicity
-        const chatModels = data.data
-          .map((m: any) => m.id)
+        const chatModels = (data.data ?? [])
+          .map((model) => model.id)
           .filter((id: string) => id.startsWith("gpt-") && !id.includes("vision") && !id.includes("instruct"))
           .sort();
         if (chatModels.length > 0) {
@@ -178,13 +173,40 @@ export default function Home() {
         body: JSON.stringify({ aivisUrl: url }),
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as AivisSpeaker[];
         setSpeakers(data);
       }
     } catch (err) {
       console.error("Failed to fetch speakers:", err);
     }
   };
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      const key = localStorage.getItem("openai_api_key") || "";
+      const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
+      const tts = (localStorage.getItem("tts_type") as "aivis" | "voicevox" | "custom") || "aivis";
+      const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
+      const speaker = localStorage.getItem("aivis_speaker") || "2";
+      const bgType = (localStorage.getItem("runtime_bg_type") as "color" | "image") || "color";
+      const bgColor = localStorage.getItem("runtime_bg_color") || "#f7f8fb";
+
+      setOpenaiApiKey(key);
+      setOpenaiModel(model);
+      setTtsType(tts);
+      setAivisUrl(url);
+      setSelectedSpeaker(speaker);
+      setRuntimeBgType(bgType === "image" ? "color" : bgType);
+      setRuntimeBgColor(bgColor);
+
+      if (url) {
+        void fetchSpeakers(url);
+      }
+      if (key) {
+        void fetchOpenaiModels(key);
+      }
+    });
+  }, []);
 
   const handleOpenaiKeyChange = (key: string) => {
     setOpenaiApiKey(key);
@@ -251,7 +273,7 @@ export default function Home() {
           if (errData.error?.message) {
             errMsg = errData.error.message;
           }
-        } catch (_) {}
+        } catch {}
         throw new Error(`OpenAI API returned error: ${errMsg}`);
       }
 
@@ -289,7 +311,8 @@ export default function Home() {
   };
 
   const playAudioAndSyncMouth = async (audioBuffer: ArrayBuffer) => {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
+    if (!AudioContextClass) throw new Error("このブラウザはWeb Audio APIに対応していません");
     const audioCtx = new AudioContextClass();
     const buffer = await audioCtx.decodeAudioData(audioBuffer);
 
@@ -305,6 +328,9 @@ export default function Home() {
 
     const data = new Uint8Array(analyser.fftSize);
     let animationFrameId = 0;
+    let lastUpdateTime = 0;
+    let smoothedLevel = 0;
+    const UPDATE_INTERVAL = 50; // 更新間隔を50ms（約20fps）に縮めて追従性をアップ
 
     const syncMouth = () => {
       analyser.getByteTimeDomainData(data);
@@ -314,14 +340,26 @@ export default function Home() {
         sum += centered * centered;
       }
       const rms = Math.sqrt(sum / data.length);
-      const level = Math.min(rms * 8, 1);
+      const rawLevel = Math.min(rms * 10, 1); // 倍率を8から10に上げて小さな音でも反応しやすく
 
-      if (level > 0.55) {
-        setActiveMouthShape("open");
-      } else if (level > 0.22) {
-        setActiveMouthShape("half");
+      // 音量が上がるときは即座に口を開き、下がるときはややなめらかに閉じる
+      if (rawLevel > smoothedLevel) {
+        smoothedLevel = rawLevel;
       } else {
-        setActiveMouthShape("closed");
+        smoothedLevel = smoothedLevel * 0.6 + rawLevel * 0.4; // 減衰の引き継ぎを60%に抑えてメリハリを出す
+      }
+
+      const now = performance.now();
+      if (now - lastUpdateTime >= UPDATE_INTERVAL) {
+        lastUpdateTime = now;
+
+        if (smoothedLevel > 0.45) { // 閾値を0.55から0.45に下げて大口を開けやすく
+          setActiveMouthShape("open");
+        } else if (smoothedLevel > 0.15) { // 閾値を0.22から0.15に下げて口を動かしやすく
+          setActiveMouthShape("half");
+        } else {
+          setActiveMouthShape("closed");
+        }
       }
 
       animationFrameId = requestAnimationFrame(syncMouth);
@@ -1246,11 +1284,30 @@ export default function Home() {
       <div className="flex min-h-screen flex-col">
         <header className="absolute top-0 left-0 w-full z-50 bg-transparent">
           <div className="mx-auto flex max-w-[1560px] items-center justify-start px-5 pt-6 pb-2">
-            <nav className="flex rounded-md border border-slate-200 bg-white p-1 shadow-sm">
-              <ModeButton active={mode === "materials"} icon={<Wand2 />} label="素材生成" onClick={() => setMode("materials")} />
-              <ModeButton active={mode === "runtime"} icon={<Radio />} label="配信モード" onClick={() => setMode("runtime")} />
-              <ModeButton active={mode === "settings"} icon={<Settings />} label="設定" onClick={() => setMode("settings")} />
-            </nav>
+            {isHeaderVisible ? (
+              <div className="group relative flex items-center">
+                <nav className="flex rounded-md border border-slate-200 bg-white p-1 shadow-sm transition-all duration-300">
+                  <ModeButton active={mode === "materials"} icon={<Wand2 />} label="素材生成" onClick={() => setMode("materials")} />
+                  <ModeButton active={mode === "runtime"} icon={<Radio />} label="配信モード" onClick={() => setMode("runtime")} />
+                  <ModeButton active={mode === "settings"} icon={<Settings />} label="設定" onClick={() => setMode("settings")} />
+                </nav>
+                <button
+                  onClick={() => setIsHeaderVisible(false)}
+                  className="absolute -right-2.5 -top-2.5 flex size-5 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 opacity-0 shadow-sm transition-all duration-200 hover:bg-slate-50 hover:text-slate-600 group-hover:opacity-100"
+                  title="メニューを隠す"
+                >
+                  <Minus className="size-3" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setIsHeaderVisible(true)}
+                className="flex size-8 items-center justify-center rounded-md border border-slate-200 bg-white/80 text-slate-500 shadow-sm backdrop-blur-sm transition-all duration-200 hover:bg-white hover:text-slate-800"
+                title="メニューを表示"
+              >
+                <Plus className="size-4" />
+              </button>
+            )}
           </div>
         </header>
 
@@ -1633,8 +1690,8 @@ export default function Home() {
                     className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm bg-white shadow-sm focus:border-teal-500 focus:outline-none"
                   >
                     {speakers.length > 0 ? (
-                      speakers.map((sp: any) =>
-                        sp.styles.map((style: any) => (
+                      speakers.map((sp) =>
+                        sp.styles.map((style) => (
                           <option key={`${sp.speaker_uuid}-${style.id}`} value={style.id}>
                             {sp.name} ({style.name})
                           </option>
