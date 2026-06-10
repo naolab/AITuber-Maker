@@ -94,6 +94,29 @@ const isImportableQuad = (value: unknown): value is Quad =>
       point.every((coordinate) => Number.isFinite(coordinate)),
   );
 
+type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
+
+interface EmotionAsset {
+  videoUrl: string;
+  track: MouthTrack | null;
+  videoName?: string;
+  trackName?: string;
+}
+
+interface PendingSpeech {
+  emotion: Emotion;
+  text: string;
+  audioBuffer: ArrayBuffer;
+}
+
+const EMOTIONS: { key: Emotion; label: string }[] = [
+  { key: "normal", label: "通常" },
+  { key: "happy", label: "嬉しい" },
+  { key: "angry", label: "怒り" },
+  { key: "surprised", label: "驚き" },
+  { key: "sad", label: "悲しい" },
+];
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("materials");
   const [isHeaderVisible, setIsHeaderVisible] = useState(true);
@@ -135,6 +158,21 @@ export default function Home() {
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
+
+  const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
+    normal: { videoUrl: "", track: null },
+    happy: { videoUrl: "", track: null },
+    angry: { videoUrl: "", track: null },
+    surprised: { videoUrl: "", track: null },
+    sad: { videoUrl: "", track: null },
+  });
+  const [currentEmotion, setCurrentEmotion] = useState<Emotion>("normal");
+  const [pendingSpeech, setPendingSpeech] = useState<PendingSpeech | null>(null);
+  const pendingSpeechRef = useRef<PendingSpeech | null>(null);
+
+  useEffect(() => {
+    pendingSpeechRef.current = pendingSpeech;
+  }, [pendingSpeech]);
 
   const [runtimeBgType, setRuntimeBgType] = useState<"color" | "image">("color");
   const [runtimeBgColor, setRuntimeBgColor] = useState("#f7f8fb");
@@ -262,7 +300,27 @@ export default function Home() {
         },
         body: JSON.stringify({
           model: openaiModel,
-          messages: [{ role: "user", content: chatInput }],
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content: `あなたはAITuberのキャラクターとして振る舞ってください。ユーザーとの対話において、キャラクターとしての返答本文と、その返答の感情（通常、嬉しい、怒り、驚き、悲しい）を、必ず以下のJSONフォーマットで返却してください。
+
+JSONフォーマット例:
+{
+  "emotion": "嬉しい",
+  "text": "こんにちは！お話しできてとても嬉しいです！"
+}
+
+感情の選択肢（値は以下のいずれか1つのみにしてください）:
+- "通常"
+- "嬉しい"
+- "怒り"
+- "驚き"
+- "悲しい"`,
+            },
+            { role: "user", content: chatInput },
+          ],
         }),
       });
 
@@ -278,15 +336,32 @@ export default function Home() {
       }
 
       const chatData = await chatRes.json();
-      const replyText = chatData.choices[0].message.content;
-      setLastReply(replyText);
+      const replyJson = chatData.choices[0].message.content;
+      
+      let emotion: Emotion = "normal";
+      let cleanText = "";
+      try {
+        const parsed = JSON.parse(replyJson);
+        cleanText = parsed.text || "";
+        const emotionStr = parsed.emotion;
+        if (emotionStr === "嬉しい") emotion = "happy";
+        else if (emotionStr === "怒り") emotion = "angry";
+        else if (emotionStr === "驚き") emotion = "surprised";
+        else if (emotionStr === "悲しい") emotion = "sad";
+        else emotion = "normal";
+      } catch (err) {
+        console.error("Failed to parse OpenAI JSON response:", err);
+        cleanText = replyJson;
+      }
+
+      setLastReply(cleanText);
 
       // 2. Aivis Speech synthesis
       const synthRes = await fetch("/api/aivis/synthesis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: replyText,
+          text: cleanText,
           speaker: Number(selectedSpeaker),
           aivisUrl,
         }),
@@ -298,8 +373,12 @@ export default function Home() {
 
       const audioBuffer = await synthRes.arrayBuffer();
 
-      // 3. Play and sync mouth
-      await playAudioAndSyncMouth(audioBuffer);
+      // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
+      setPendingSpeech({
+        emotion,
+        text: cleanText,
+        audioBuffer,
+      });
 
       setChatInput("");
     } catch (err) {
@@ -373,6 +452,35 @@ export default function Home() {
 
     source.start(0);
     syncMouth();
+  };
+
+  const handleVideoEnded = async () => {
+    const video = runtimeVideoRef.current;
+    if (!video) return;
+
+    const pending = pendingSpeechRef.current;
+    if (pending) {
+      const nextEmotion = pending.emotion;
+      let asset = emotionAssets[nextEmotion];
+      if (!asset || !asset.videoUrl) {
+        asset = emotionAssets["normal"];
+      }
+
+      if (asset && asset.videoUrl) {
+        setCurrentEmotion(nextEmotion);
+        setMouthlessUrl(asset.videoUrl);
+        setTrack(asset.track);
+        video.src = asset.videoUrl;
+        video.load();
+      }
+
+      await playAudioAndSyncMouth(pending.audioBuffer);
+      setPendingSpeech(null);
+      void video.play();
+    } else {
+      video.currentTime = 0;
+      void video.play();
+    }
   };
 
   const [scale, setScale] = useState(1);
@@ -529,6 +637,110 @@ export default function Home() {
     }
   };
 
+  const emotionVideoUrlsRef = useRef<Record<Emotion, string>>({
+    normal: "",
+    happy: "",
+    angry: "",
+    surprised: "",
+    sad: "",
+  });
+
+  const handleEmotionVideoUpload = (emotion: Emotion, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const isChromeVideo = file.type === "video/webm" || 
+                            file.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(file.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        event.target.value = "";
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      
+      // Revoke old URL if exists
+      const oldUrl = emotionVideoUrlsRef.current[emotion];
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      emotionVideoUrlsRef.current[emotion] = url;
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          videoUrl: url,
+          videoName: file.name,
+        },
+      }));
+
+      // If configuring normal, sync with mouthlessUrl
+      if (emotion === "normal") {
+        setMouthlessUrl(url);
+      }
+    }
+  };
+
+  const handleEmotionTrackUpload = async (emotion: Emotion, event: ChangeEvent<HTMLInputElement>) => {
+    const jsonFile = event.target.files?.[0];
+    if (!jsonFile) return;
+
+    try {
+      const parsed = JSON.parse(await jsonFile.text()) as MouthTrack;
+      if (
+        !Number.isFinite(parsed.fps) ||
+        !Number.isFinite(parsed.width) ||
+        !Number.isFinite(parsed.height) ||
+        !Array.isArray(parsed.frames)
+      ) {
+        throw new Error("mouth_track.json の形式が違います");
+      }
+
+      const normalizedTrack: MouthTrack = {
+        fps: parsed.fps,
+        width: parsed.width,
+        height: parsed.height,
+        detector: parsed.detector ?? {
+          name: "imported mouth_track.json",
+          runtime: "unknown",
+          backend: "unknown",
+          processor: "import",
+          analysisFps: parsed.fps,
+          speedMode: "balanced",
+        },
+        frames: parsed.frames.map((frame, index) => {
+          if (!isImportableQuad(frame.quad)) {
+            throw new Error(`mouth_track.json の ${index} 番目のquadが不正です`);
+          }
+
+          return {
+            index: Number.isFinite(frame.index) ? frame.index : index,
+            quad: clampQuad(frame.quad, parsed.width, parsed.height),
+            valid: Boolean(frame.valid),
+            confidence: Number(frame.confidence) || 0,
+            source: frame.source || "import",
+            processor: frame.processor || "import",
+          };
+        }),
+      };
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          track: normalizedTrack,
+          trackName: jsonFile.name,
+        },
+      }));
+
+      if (emotion === "normal") {
+        setTrack(normalizedTrack);
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
   const handleMouthSpriteUpload = (name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -582,12 +794,16 @@ export default function Home() {
   }, [track]);
 
   useEffect(() => {
+    const emotionVideoUrls = emotionVideoUrlsRef.current;
     return () => {
       revokeObjectUrl(videoUrlRef.current);
       revokeObjectUrl(downloadUrlRef.current);
       mouthSpriteUrlsRef.current.forEach(revokeObjectUrl);
       revokeObjectUrl(mouthlessUrlRef.current);
       revokeObjectUrl(runtimeBgImageUrlRef.current);
+      Object.values(emotionVideoUrls).forEach(url => {
+        if (url) revokeObjectUrl(url);
+      });
       workerRef.current?.terminate();
       cancelScheduledFrameSync();
     };
@@ -1545,9 +1761,10 @@ export default function Home() {
                   className="pointer-events-none max-w-4xl"
                   src={mouthlessUrl}
                   autoPlay
-                  loop
+                  loop={false}
                   muted
                   playsInline
+                  onEnded={handleVideoEnded}
                 />
                 <canvas
                   ref={runtimeCanvasRef}
@@ -1560,8 +1777,11 @@ export default function Home() {
             <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 flex flex-col items-center gap-4">
               {/* Latest Reply Bubble */}
               {lastReply && (
-                <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all">
-                  {lastReply}
+                <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all relative">
+                  <div className="absolute -top-2.5 left-4 px-2 py-0.5 rounded bg-teal-600 text-[10px] font-bold text-white shadow-sm">
+                    {EMOTIONS.find(e => e.key === currentEmotion)?.label || "通常"}
+                  </div>
+                  <div className="mt-1">{lastReply}</div>
                 </div>
               )}
 
@@ -1701,6 +1921,66 @@ export default function Home() {
                       <option value="2">四国めたん (ノーマル) [接続待ち...]</option>
                     )}
                   </select>
+                </div>
+
+                {/* Emotion Assets Settings */}
+                <div className="h-px bg-slate-200 my-4" />
+                
+                <div className="grid gap-4">
+                  <label className="text-sm font-semibold text-slate-800">感情別キャラクター素材設定</label>
+                  <p className="text-xs text-slate-500">AIの感情表現に合わせて切り替えるための「口無し動画」と「口位置追跡データ（mouth_track.json）」を設定します。</p>
+                  
+                  <div className="space-y-4">
+                    {EMOTIONS.map((emotion) => {
+                      const asset = emotionAssets[emotion.key];
+                      return (
+                        <div key={emotion.key} className="rounded-lg border border-slate-200 p-4 bg-slate-50/50 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                              <span className="inline-block w-2.5 h-2.5 rounded-full bg-teal-500" />
+                              {emotion.label} ({emotion.key})
+                            </span>
+                          </div>
+                          
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {/* Video Upload */}
+                            <div className="space-y-1">
+                              <span className="text-xs font-semibold text-slate-600 block">口無し動画</span>
+                              <label className="flex items-center gap-2 cursor-pointer rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition">
+                                <Video className="size-3.5 flex-shrink-0" />
+                                <span className="truncate flex-1 text-left">
+                                  {asset.videoName || "動画を選択..."}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="video/webm,video/mp4"
+                                  className="sr-only"
+                                  onChange={(e) => handleEmotionVideoUpload(emotion.key, e)}
+                                />
+                              </label>
+                            </div>
+                            
+                            {/* JSON Upload */}
+                            <div className="space-y-1">
+                              <span className="text-xs font-semibold text-slate-600 block">口位置 JSON</span>
+                              <label className="flex items-center gap-2 cursor-pointer rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition">
+                                <FileJson className="size-3.5 flex-shrink-0" />
+                                <span className="truncate flex-1 text-left">
+                                  {asset.trackName || "JSONを選択..."}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="application/json"
+                                  className="sr-only"
+                                  onChange={(e) => void handleEmotionTrackUpload(emotion.key, e)}
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {/* Runtime Background settings */}
