@@ -1812,7 +1812,7 @@ JSONフォーマット例:
         )}
 
         {mode === "settings" && (
-          <section className="mx-auto w-full max-w-2xl flex-1 px-5 pt-24 pb-4">
+          <section className="mx-auto w-full max-w-4xl flex-1 px-5 pt-24 pb-4">
             <div className="rounded-md border border-slate-200 bg-white p-6 shadow-sm">
               <PanelTitle icon={<Settings />} title="連携設定" badge="連携設定" />
               
