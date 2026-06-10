@@ -96,6 +96,53 @@ const isImportableQuad = (value: unknown): value is Quad =>
 
 type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
 
+// IndexedDB Helper Functions
+const DB_NAME = "AITuberMakerAssets";
+const DB_VERSION = 1;
+const STORE_NAME = "assets";
+
+function initDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !window.indexedDB) {
+      reject(new Error("IndexedDB is not supported"));
+      return;
+    }
+    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+}
+
+function getAsset<T>(key: string): Promise<T | null> {
+  return initDb().then((db) => {
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readonly");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.get(key);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve((request.result as T) || null);
+    });
+  });
+}
+
+function setAsset<T>(key: string, value: T): Promise<void> {
+  return initDb().then((db) => {
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.put(value, key);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+  });
+}
+
 interface EmotionAsset {
   videoUrl: string;
   track: MouthTrack | null;
@@ -221,8 +268,42 @@ export default function Home() {
     }
   };
 
+  const mouthSpriteUrlsRef = useRef<string[]>([]);
+  const emotionVideoUrlsRef = useRef<Record<Emotion, string>>({
+    normal: "",
+    happy: "",
+    angry: "",
+    surprised: "",
+    sad: "",
+  });
+  const emotionMouthSpriteUrlsRef = useRef<string[]>([]);
+
+  const setManagedMouthSprites = (nextSprites: GeneratedSprite[]) => {
+    const nextUrls = new Set(nextSprites.map((sprite) => sprite.url));
+    const urlsToRevoke = mouthSpriteUrlsRef.current.filter((url) => !nextUrls.has(url));
+    urlsToRevoke.forEach(revokeObjectUrl);
+    mouthSpriteUrlsRef.current = nextSprites.map((sprite) => sprite.url);
+    setMouthSprites(nextSprites);
+  };
+
+  // Helper to save emotion asset files to IndexedDB
+  const saveEmotionAssetToDb = async (emotion: Emotion, type: "video" | "track" | "mouthSprite", fileOrData: File | MouthTrack, spriteName?: MouthSpriteName) => {
+    try {
+      const dbKey = `emotion_${emotion}_${type}${spriteName ? `_${spriteName}` : ""}`;
+      if (type === "video" || type === "mouthSprite") {
+        const file = fileOrData as File;
+        await setAsset(dbKey, { file, name: file.name });
+      } else if (type === "track") {
+        const trackData = fileOrData as MouthTrack;
+        await setAsset(dbKey, { track: trackData, name: "mouth_track.json" });
+      }
+    } catch (err) {
+      console.error(`Failed to save asset ${type} for ${emotion} to IndexedDB:`, err);
+    }
+  };
+
   useEffect(() => {
-    window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(async () => {
       const key = localStorage.getItem("openai_api_key") || "";
       const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
       const tts = (localStorage.getItem("tts_type") as "aivis" | "voicevox" | "custom") || "aivis";
@@ -244,6 +325,76 @@ export default function Home() {
       }
       if (key) {
         void fetchOpenaiModels(key);
+      }
+
+      // Load saved assets from IndexedDB
+      try {
+        const loadedAssets: Record<Emotion, EmotionAsset> = {
+          normal: { videoUrl: "", track: null, mouthSprites: [] },
+          happy: { videoUrl: "", track: null, mouthSprites: [] },
+          angry: { videoUrl: "", track: null, mouthSprites: [] },
+          surprised: { videoUrl: "", track: null, mouthSprites: [] },
+          sad: { videoUrl: "", track: null, mouthSprites: [] },
+        };
+
+        let normalTrack: MouthTrack | null = null;
+        const normalMouthSprites: GeneratedSprite[] = [];
+
+        for (const emotion of EMOTIONS.map(e => e.key)) {
+          // 1. Video
+          const videoData = await getAsset<{ file: File; name: string }>(`emotion_${emotion}_video`);
+          if (videoData) {
+            const url = URL.createObjectURL(videoData.file);
+            loadedAssets[emotion].videoUrl = url;
+            loadedAssets[emotion].videoName = videoData.name;
+            emotionVideoUrlsRef.current[emotion] = url;
+            if (emotion === "normal") {
+              setMouthlessUrl(url);
+            }
+          }
+
+          // 2. Track JSON
+          const trackData = await getAsset<{ track: MouthTrack; name: string }>(`emotion_${emotion}_track`);
+          if (trackData) {
+            loadedAssets[emotion].track = trackData.track;
+            loadedAssets[emotion].trackName = trackData.name;
+            if (emotion === "normal") {
+              normalTrack = trackData.track;
+            }
+          }
+
+          // 3. Mouth Sprites
+          const sprites: GeneratedSprite[] = [];
+          for (const name of mouthSpriteNames) {
+            const spriteData = await getAsset<{ file: File; name: string }>(`emotion_${emotion}_mouthSprite_${name}`);
+            if (spriteData) {
+              const url = URL.createObjectURL(spriteData.file);
+              emotionMouthSpriteUrlsRef.current.push(url);
+              const sprite: GeneratedSprite = {
+                name,
+                url,
+                frameIndex: 0,
+                width: 0,
+                height: 0,
+              };
+              sprites.push(sprite);
+              if (emotion === "normal") {
+                normalMouthSprites.push(sprite);
+              }
+            }
+          }
+          loadedAssets[emotion].mouthSprites = sprites;
+        }
+
+        setEmotionAssets(loadedAssets);
+        if (normalTrack) {
+          setTrack(normalTrack);
+        }
+        if (normalMouthSprites.length > 0) {
+          setManagedMouthSprites(normalMouthSprites);
+        }
+      } catch (err) {
+        console.error("Failed to restore saved assets from IndexedDB:", err);
       }
     });
   }, []);
@@ -621,7 +772,6 @@ JSONフォーマット例:
   const animationFrameRef = useRef(0);
   const videoUrlRef = useRef("");
   const downloadUrlRef = useRef("");
-  const mouthSpriteUrlsRef = useRef<string[]>([]);
   const mouthlessUrlRef = useRef("");
 
   const setManagedVideoUrl = (nextUrl: string) => {
@@ -636,13 +786,7 @@ JSONフォーマット例:
     setDownloadUrl(nextUrl);
   };
 
-  const setManagedMouthSprites = (nextSprites: GeneratedSprite[]) => {
-    const nextUrls = new Set(nextSprites.map((sprite) => sprite.url));
-    const urlsToRevoke = mouthSpriteUrlsRef.current.filter((url) => !nextUrls.has(url));
-    urlsToRevoke.forEach(revokeObjectUrl);
-    mouthSpriteUrlsRef.current = nextSprites.map((sprite) => sprite.url);
-    setMouthSprites(nextSprites);
-  };
+
 
   const setManagedMouthlessUrl = (nextUrl: string) => {
     revokeObjectUrl(mouthlessUrlRef.current);
@@ -666,14 +810,6 @@ JSONフォーマット例:
       setMouthlessStatus("アップロード完了");
     }
   };
-
-  const emotionVideoUrlsRef = useRef<Record<Emotion, string>>({
-    normal: "",
-    happy: "",
-    angry: "",
-    surprised: "",
-    sad: "",
-  });
 
   const handleEmotionVideoUpload = (emotion: Emotion, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -706,6 +842,7 @@ JSONフォーマット例:
       if (emotion === "normal") {
         setMouthlessUrl(url);
       }
+      void saveEmotionAssetToDb(emotion, "video", file);
     }
   };
 
@@ -764,14 +901,13 @@ JSONフォーマット例:
       if (emotion === "normal") {
         setTrack(normalizedTrack);
       }
+      void saveEmotionAssetToDb(emotion, "track", normalizedTrack);
     } catch (error) {
       alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
     } finally {
       event.target.value = "";
     }
   };
-
-  const emotionMouthSpriteUrlsRef = useRef<string[]>([]);
 
   const handleEmotionMouthSpriteUpload = (emotion: Emotion, name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -809,6 +945,7 @@ JSONフォーマット例:
         newSprite,
       ]);
     }
+    void saveEmotionAssetToDb(emotion, "mouthSprite", file, name);
   };
 
   const handleEmotionVideoDrop = (emotion: Emotion, event: DragEvent<HTMLLabelElement>) => {
@@ -840,6 +977,7 @@ JSONフォーマット例:
       if (emotion === "normal") {
         setMouthlessUrl(url);
       }
+      void saveEmotionAssetToDb(emotion, "video", file);
     }
   };
 
@@ -899,6 +1037,7 @@ JSONフォーマット例:
       if (emotion === "normal") {
         setTrack(normalizedTrack);
       }
+      void saveEmotionAssetToDb(emotion, "track", normalizedTrack);
     } catch (error) {
       alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
     }
@@ -945,6 +1084,7 @@ JSONフォーマット例:
         newSprite,
       ]);
     }
+    void saveEmotionAssetToDb(emotion, "mouthSprite", file, name);
   };
 
   const handleMouthSpriteUpload = (name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
