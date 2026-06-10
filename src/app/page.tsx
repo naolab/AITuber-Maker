@@ -611,9 +611,41 @@ JSONフォーマット例:
     syncMouth();
   };
 
+  const activeVideoIndexRef = useRef<0 | 1>(0);
+  const runtimeVideoRef0 = useRef<HTMLVideoElement | null>(null);
+  const runtimeVideoRef1 = useRef<HTMLVideoElement | null>(null);
+
+  const getActiveVideo = () => {
+    return activeVideoIndexRef.current === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+  };
+
+  const getInactiveVideo = () => {
+    return activeVideoIndexRef.current === 0 ? runtimeVideoRef1.current : runtimeVideoRef0.current;
+  };
+
+  const switchActiveVideo = () => {
+    const activeIndex = activeVideoIndexRef.current;
+    const nextIndex = activeIndex === 0 ? 1 : 0;
+    
+    const prevVideo = activeIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+    const nextVideo = nextIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+
+    if (prevVideo && nextVideo) {
+      // Show next video, hide previous video
+      nextVideo.style.opacity = "1";
+      prevVideo.style.opacity = "0";
+      
+      // Stop previous video to save performance
+      prevVideo.pause();
+    }
+    
+    activeVideoIndexRef.current = nextIndex;
+  };
+
   const handleVideoEnded = async () => {
-    const video = runtimeVideoRef.current;
-    if (!video) return;
+    const currentVideo = getActiveVideo();
+    const nextVideo = getInactiveVideo();
+    if (!currentVideo || !nextVideo) return;
 
     const pending = pendingSpeechRef.current;
     if (pending) {
@@ -627,14 +659,19 @@ JSONフォーマット例:
         setCurrentEmotion(nextEmotion);
         setMouthlessUrl(asset.videoUrl);
         setTrack(asset.track);
-        video.src = asset.videoUrl;
-        video.load();
-        await waitForEvent(video, "canplay");
+
+        // Preload on inactive video
+        nextVideo.src = asset.videoUrl;
+        nextVideo.load();
+        await waitForEvent(nextVideo, "canplay");
       }
 
       await playAudioAndSyncMouth(pending.audioBuffer);
       setPendingSpeech(null);
-      void video.play();
+      
+      // Start playback and swap immediately
+      void nextVideo.play();
+      switchActiveVideo();
     } else {
       // 発話中でなく、かつ現在の感情が通常(normal)以外の場合、通常(normal)に戻す
       if (!isSpeakingRef.current && currentEmotion !== "normal") {
@@ -643,14 +680,19 @@ JSONフォーマット例:
           setCurrentEmotion("normal");
           setMouthlessUrl(normalAsset.videoUrl);
           setTrack(normalAsset.track);
-          video.src = normalAsset.videoUrl;
-          video.load();
-          await waitForEvent(video, "canplay");
+
+          // Preload on inactive video
+          nextVideo.src = normalAsset.videoUrl;
+          nextVideo.load();
+          await waitForEvent(nextVideo, "canplay");
+          
+          void nextVideo.play();
+          switchActiveVideo();
         }
       } else {
-        video.currentTime = 0;
+        currentVideo.currentTime = 0;
+        void currentVideo.play();
       }
-      void video.play();
     }
   };
 
@@ -2157,20 +2199,33 @@ JSONフォーマット例:
                 onMouseDown={handleMouseDown}
                 onWheel={handleWheel}
               >
-                <video
-                  ref={runtimeVideoRef}
-                  className="pointer-events-none max-w-4xl"
-                  src={mouthlessUrl}
-                  autoPlay
-                  loop={false}
-                  muted
-                  playsInline
-                  onEnded={handleVideoEnded}
-                />
-                <canvas
-                  ref={runtimeCanvasRef}
-                  className="pointer-events-none absolute left-0 top-0 w-full h-full"
-                />
+                <div className="relative max-w-4xl">
+                  <video
+                    ref={runtimeVideoRef0}
+                    className="pointer-events-none w-full h-auto transition-opacity duration-75"
+                    style={{ opacity: 1 }}
+                    src={mouthlessUrl}
+                    autoPlay
+                    loop={false}
+                    muted
+                    playsInline
+                    onEnded={handleVideoEnded}
+                  />
+                  <video
+                    ref={runtimeVideoRef1}
+                    className="pointer-events-none absolute top-0 left-0 w-full h-auto transition-opacity duration-75"
+                    style={{ opacity: 0 }}
+                    autoPlay
+                    loop={false}
+                    muted
+                    playsInline
+                    onEnded={handleVideoEnded}
+                  />
+                  <canvas
+                    ref={runtimeCanvasRef}
+                    className="pointer-events-none absolute left-0 top-0 w-full h-full"
+                  />
+                </div>
               </div>
             )}
 
