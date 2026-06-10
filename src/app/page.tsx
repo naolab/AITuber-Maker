@@ -1324,6 +1324,18 @@ JSONフォーマット例:
     }
   };
 
+  const downloadAllMouthSprites = () => {
+    mouthSpriteNames.forEach((name) => {
+      const sprite = mouthSprites.find((s) => s.name === name);
+      if (sprite) {
+        const link = document.createElement("a");
+        link.href = sprite.url;
+        link.download = `${name}.png`;
+        link.click();
+      }
+    });
+  };
+
   const createMouthlessFrame = (
     outputContext: CanvasRenderingContext2D,
     patchContext: CanvasRenderingContext2D,
@@ -1727,14 +1739,24 @@ JSONフォーマット例:
 
               <div className="h-px bg-slate-200" />
               <PanelTitle icon={<Image />} title="口PNG差分" badge={mouthStatus} />
-              <button
-                className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={!track || !videoUrl || isExtractingMouth || isRunningAll}
-                onClick={() => void extractMouthSprites()}
-              >
-                <Play className="size-4" />
-                5種を自動抽出
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  disabled={!track || !videoUrl || isExtractingMouth || isRunningAll}
+                  onClick={() => void extractMouthSprites()}
+                >
+                  <Play className="size-4" />
+                  5種を自動抽出
+                </button>
+                <button
+                  className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  disabled={mouthSprites.length === 0}
+                  onClick={downloadAllMouthSprites}
+                >
+                  <Download className="size-4" />
+                  一括保存
+                </button>
+              </div>
               <div className="grid grid-cols-5 gap-2">
                 {mouthSpriteNames.map((name) => {
                   const sprite = mouthSprites.find((s) => s.name === name);
@@ -1751,6 +1773,20 @@ JSONフォーマット例:
                       />
                       {sprite ? (
                         <>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              const link = document.createElement("a");
+                              link.href = sprite.url;
+                              link.download = `${name}.png`;
+                              link.click();
+                            }}
+                            className="absolute top-1 right-1 z-10 rounded-full bg-slate-900/80 p-1 text-white hover:bg-slate-900 opacity-0 group-hover:opacity-100 transition"
+                          >
+                            <Download className="size-3" />
+                          </button>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img className="aspect-square w-full rounded bg-white object-contain" src={sprite.url} alt={`${name} mouth`} />
                           <span className="truncate text-slate-700">{name}</span>
@@ -2115,6 +2151,20 @@ JSONフォーマット例:
                                     />
                                     {sprite ? (
                                       <>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            e.preventDefault();
+                                            const link = document.createElement("a");
+                                            link.href = sprite.url;
+                                            link.download = `${emotion.key}_${name}.png`;
+                                            link.click();
+                                          }}
+                                          className="absolute top-1 right-1 z-10 rounded-full bg-slate-900/80 p-1 text-white hover:bg-slate-900 opacity-0 group-hover:opacity-100 transition"
+                                        >
+                                          <Download className="size-2.5" />
+                                        </button>
                                         {/* eslint-disable-next-line @next/next/no-img-element */}
                                         <img className="aspect-square w-full rounded bg-slate-50 object-contain border border-slate-100" src={sprite.url} alt={`${name} mouth`} />
                                         <span className="truncate text-slate-600 text-[9px] mt-0.5">{name}</span>
