@@ -207,6 +207,7 @@ export default function Home() {
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
+  const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
 
   const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
     normal: { videoUrl: "", track: null, mouthSprites: [] },
@@ -616,11 +617,11 @@ JSONフォーマット例:
   const runtimeVideoRef1 = useRef<HTMLVideoElement | null>(null);
 
   const getActiveVideo = () => {
-    return activeVideoIndexRef.current === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+    return activeVideoIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
   };
 
   const getInactiveVideo = () => {
-    return activeVideoIndexRef.current === 0 ? runtimeVideoRef1.current : runtimeVideoRef0.current;
+    return activeVideoIndex === 0 ? runtimeVideoRef1.current : runtimeVideoRef0.current;
   };
 
   const switchActiveVideo = () => {
@@ -628,18 +629,13 @@ JSONフォーマット例:
     const nextIndex = activeIndex === 0 ? 1 : 0;
     
     const prevVideo = activeIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
-    const nextVideo = nextIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
-
-    if (prevVideo && nextVideo) {
-      // Show next video, hide previous video
-      nextVideo.style.opacity = "1";
-      prevVideo.style.opacity = "0";
-      
+    if (prevVideo) {
       // Stop previous video to save performance
       prevVideo.pause();
     }
     
     activeVideoIndexRef.current = nextIndex;
+    setActiveVideoIndex(nextIndex);
   };
 
   const handleVideoEnded = async () => {
@@ -2193,16 +2189,21 @@ JSONフォーマット例:
                   transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
                   transformOrigin: "center center",
                   cursor: isDraggingVideo ? "grabbing" : "grab",
+                  width: videoMeta.width ? `${videoMeta.width}px` : "800px",
+                  height: videoMeta.height ? `${videoMeta.height}px` : "450px",
+                  maxWidth: "90vw",
+                  maxHeight: "80vh",
+                  aspectRatio: videoMeta.width && videoMeta.height ? `${videoMeta.width} / ${videoMeta.height}` : "16/9",
                 }}
-                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none"
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden bg-black"
                 onMouseDown={handleMouseDown}
                 onWheel={handleWheel}
               >
-                <div className="relative max-w-4xl">
+                <div className="relative w-full h-full">
                   <video
                     ref={runtimeVideoRef0}
-                    className="pointer-events-none w-full h-auto transition-opacity duration-75"
-                    style={{ opacity: 1 }}
+                    className="pointer-events-none absolute inset-0 w-full h-full object-fill transition-opacity duration-150"
+                    style={{ opacity: activeVideoIndex === 0 ? 1 : 0 }}
                     src={mouthlessUrl}
                     autoPlay
                     loop={false}
@@ -2212,8 +2213,8 @@ JSONフォーマット例:
                   />
                   <video
                     ref={runtimeVideoRef1}
-                    className="pointer-events-none absolute top-0 left-0 w-full h-auto transition-opacity duration-75"
-                    style={{ opacity: 0 }}
+                    className="pointer-events-none absolute inset-0 w-full h-full object-fill transition-opacity duration-150"
+                    style={{ opacity: activeVideoIndex === 1 ? 1 : 0 }}
                     autoPlay
                     loop={false}
                     muted
