@@ -101,6 +101,7 @@ interface EmotionAsset {
   track: MouthTrack | null;
   videoName?: string;
   trackName?: string;
+  mouthSprites?: GeneratedSprite[];
 }
 
 interface PendingSpeech {
@@ -161,11 +162,11 @@ export default function Home() {
   const [lastReply, setLastReply] = useState("");
 
   const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
-    normal: { videoUrl: "", track: null },
-    happy: { videoUrl: "", track: null },
-    angry: { videoUrl: "", track: null },
-    surprised: { videoUrl: "", track: null },
-    sad: { videoUrl: "", track: null },
+    normal: { videoUrl: "", track: null, mouthSprites: [] },
+    happy: { videoUrl: "", track: null, mouthSprites: [] },
+    angry: { videoUrl: "", track: null, mouthSprites: [] },
+    surprised: { videoUrl: "", track: null, mouthSprites: [] },
+    sad: { videoUrl: "", track: null, mouthSprites: [] },
   });
   const [currentEmotion, setCurrentEmotion] = useState<Emotion>("normal");
   const [pendingSpeech, setPendingSpeech] = useState<PendingSpeech | null>(null);
@@ -541,8 +542,16 @@ JSONフォーマット例:
 
     if (frame?.valid && frame.quad) {
       const spriteName = activeMouthShape.toLowerCase();
-      const sprite = mouthSprites.find((s) => s.name.toLowerCase() === spriteName) ||
-                     mouthSprites.find((s) => s.name.toLowerCase() === "closed");
+      const currentSprites = emotionAssets[currentEmotion]?.mouthSprites;
+      const normalSprites = emotionAssets["normal"]?.mouthSprites;
+      const activeSprites = (currentSprites && currentSprites.length > 0)
+        ? currentSprites
+        : (normalSprites && normalSprites.length > 0)
+          ? normalSprites
+          : mouthSprites;
+
+      const sprite = activeSprites.find((s) => s.name.toLowerCase() === spriteName) ||
+                     activeSprites.find((s) => s.name.toLowerCase() === "closed");
 
       if (sprite) {
         let img = runtimeImageCacheRef.current[sprite.url];
@@ -582,7 +591,7 @@ JSONフォーマット例:
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, mouthlessUrl, track, activeMouthShape, mouthSprites]);
+  }, [mode, mouthlessUrl, track, activeMouthShape, mouthSprites, currentEmotion, emotionAssets]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -742,6 +751,46 @@ JSONフォーマット例:
     }
   };
 
+  const emotionMouthSpriteUrlsRef = useRef<string[]>([]);
+
+  const handleEmotionMouthSpriteUpload = (emotion: Emotion, name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    emotionMouthSpriteUrlsRef.current.push(url);
+
+    const newSprite: GeneratedSprite = {
+      name,
+      url,
+      frameIndex: 0,
+      width: 0,
+      height: 0,
+    };
+
+    setEmotionAssets((prev) => {
+      const currentSprites = prev[emotion].mouthSprites || [];
+      const updatedSprites = [
+        ...currentSprites.filter((s) => s.name !== name),
+        newSprite,
+      ];
+      return {
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          mouthSprites: updatedSprites,
+        },
+      };
+    });
+
+    if (emotion === "normal") {
+      setManagedMouthSprites([
+        ...mouthSprites.filter((s) => s.name !== name),
+        newSprite,
+      ]);
+    }
+  };
+
   const handleMouthSpriteUpload = (name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -796,6 +845,7 @@ JSONフォーマット例:
 
   useEffect(() => {
     const emotionVideoUrls = emotionVideoUrlsRef.current;
+    const emotionMouthSpriteUrls = emotionMouthSpriteUrlsRef.current;
     return () => {
       revokeObjectUrl(videoUrlRef.current);
       revokeObjectUrl(downloadUrlRef.current);
@@ -805,6 +855,7 @@ JSONフォーマット例:
       Object.values(emotionVideoUrls).forEach(url => {
         if (url) revokeObjectUrl(url);
       });
+      emotionMouthSpriteUrls.forEach(revokeObjectUrl);
       workerRef.current?.terminate();
       cancelScheduledFrameSync();
     };
@@ -2043,53 +2094,51 @@ JSONフォーマット例:
                               </label>
                             </div>
                           </div>
+
+                          {/* Mouth PNG Sprites for this Emotion */}
+                          <div className="pt-2 border-t border-slate-200/60">
+                            <span className="text-xs font-semibold text-slate-600 block mb-2">口パーツ画像（PNG素材 - 任意）</span>
+                            <div className="grid grid-cols-5 gap-2">
+                              {mouthSpriteNames.map((name) => {
+                                const currentSprites = asset.mouthSprites || [];
+                                const sprite = currentSprites.find((s) => s.name === name);
+                                return (
+                                  <label
+                                    key={name}
+                                    className="group relative grid gap-1 rounded-md border border-dashed border-slate-300 bg-white p-2 text-center text-xs font-semibold cursor-pointer hover:border-teal-500 hover:bg-teal-50/10 transition"
+                                  >
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      className="sr-only"
+                                      onChange={(e) => handleEmotionMouthSpriteUpload(emotion.key, name, e)}
+                                    />
+                                    {sprite ? (
+                                      <>
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img className="aspect-square w-full rounded bg-slate-50 object-contain border border-slate-100" src={sprite.url} alt={`${name} mouth`} />
+                                        <span className="truncate text-slate-600 text-[9px] mt-0.5">{name}</span>
+                                        <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white opacity-0 group-hover:opacity-100 transition rounded-md text-[9px]">
+                                          変更
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <div className="flex aspect-square w-full flex-col items-center justify-center text-slate-400">
+                                        <Upload className="size-3" />
+                                        <span className="mt-0.5 text-[8px] truncate text-slate-500">{name}</span>
+                                      </div>
+                                    )}
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
                 </div>
 
-                {/* Mouth PNG Sprites Settings */}
-                <div className="h-px bg-slate-200 my-4" />
-                
-                <div className="grid gap-4">
-                  <label className="text-sm font-semibold text-slate-800">口パーツ画像（PNG素材）</label>
-                  <p className="text-xs text-slate-500">発話中に音量に合わせて表示する口の透過PNG画像をアップロードします。（通常は素材生成画面から自動抽出されますが、こちらで手動で上書き・設定することも可能です）</p>
-                  
-                  <div className="grid grid-cols-5 gap-3">
-                    {mouthSpriteNames.map((name) => {
-                      const sprite = mouthSprites.find((s) => s.name === name);
-                      return (
-                        <label
-                          key={name}
-                          className="group relative grid gap-1 rounded-lg border border-dashed border-slate-300 bg-slate-50/50 p-3 text-center text-xs font-semibold cursor-pointer hover:border-teal-500 hover:bg-teal-50/10 transition"
-                        >
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="sr-only"
-                            onChange={(e) => handleMouthSpriteUpload(name, e)}
-                          />
-                          {sprite ? (
-                            <>
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img className="aspect-square w-full rounded bg-white object-contain shadow-sm border border-slate-100" src={sprite.url} alt={`${name} mouth`} />
-                              <span className="truncate text-slate-700 text-[10px] mt-1">{name}</span>
-                              <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white opacity-0 group-hover:opacity-100 transition rounded-lg text-[10px]">
-                                変更
-                              </span>
-                            </>
-                          ) : (
-                            <div className="flex aspect-square w-full flex-col items-center justify-center text-slate-400">
-                              <Upload className="size-4" />
-                              <span className="mt-1 text-[9px] truncate text-slate-500">{name}</span>
-                            </div>
-                          )}
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
 
                 {/* Runtime Background settings */}
                 <div className="h-px bg-slate-200 my-4" />
