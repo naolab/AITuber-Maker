@@ -2031,6 +2031,48 @@ JSONフォーマット例:
                   </div>
                 </div>
 
+                {/* Mouth PNG Sprites Settings */}
+                <div className="h-px bg-slate-200 my-4" />
+                
+                <div className="grid gap-4">
+                  <label className="text-sm font-semibold text-slate-800">口パーツ画像（PNG素材）</label>
+                  <p className="text-xs text-slate-500">発話中に音量に合わせて表示する口の透過PNG画像をアップロードします。（通常は素材生成画面から自動抽出されますが、こちらで手動で上書き・設定することも可能です）</p>
+                  
+                  <div className="grid grid-cols-5 gap-3">
+                    {mouthSpriteNames.map((name) => {
+                      const sprite = mouthSprites.find((s) => s.name === name);
+                      return (
+                        <label
+                          key={name}
+                          className="group relative grid gap-1 rounded-lg border border-dashed border-slate-300 bg-slate-50/50 p-3 text-center text-xs font-semibold cursor-pointer hover:border-teal-500 hover:bg-teal-50/10 transition"
+                        >
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="sr-only"
+                            onChange={(e) => handleMouthSpriteUpload(name, e)}
+                          />
+                          {sprite ? (
+                            <>
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img className="aspect-square w-full rounded bg-white object-contain shadow-sm border border-slate-100" src={sprite.url} alt={`${name} mouth`} />
+                              <span className="truncate text-slate-700 text-[10px] mt-1">{name}</span>
+                              <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white opacity-0 group-hover:opacity-100 transition rounded-lg text-[10px]">
+                                変更
+                              </span>
+                            </>
+                          ) : (
+                            <div className="flex aspect-square w-full flex-col items-center justify-center text-slate-400">
+                              <Upload className="size-4" />
+                              <span className="mt-1 text-[9px] truncate text-slate-500">{name}</span>
+                            </div>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Runtime Background settings */}
                 <div className="h-px bg-slate-200 my-4" />
                 
