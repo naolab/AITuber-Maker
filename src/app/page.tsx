@@ -619,7 +619,9 @@ JSONフォーマット例:
   };
 
   const setManagedMouthSprites = (nextSprites: GeneratedSprite[]) => {
-    mouthSpriteUrlsRef.current.forEach(revokeObjectUrl);
+    const nextUrls = new Set(nextSprites.map((sprite) => sprite.url));
+    const urlsToRevoke = mouthSpriteUrlsRef.current.filter((url) => !nextUrls.has(url));
+    urlsToRevoke.forEach(revokeObjectUrl);
     mouthSpriteUrlsRef.current = nextSprites.map((sprite) => sprite.url);
     setMouthSprites(nextSprites);
   };
