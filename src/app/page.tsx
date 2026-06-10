@@ -391,6 +391,15 @@ export default function Home() {
         if (normalTrack) {
           setTrack(normalTrack);
         }
+        if (loadedAssets.normal.videoUrl && runtimeVideoRef0.current) {
+          videoAsset0Ref.current = {
+            videoUrl: loadedAssets.normal.videoUrl,
+            track: normalTrack,
+            emotion: "normal",
+          };
+          runtimeVideoRef0.current.src = loadedAssets.normal.videoUrl;
+          runtimeVideoRef0.current.load();
+        }
         if (normalMouthSprites.length > 0) {
           setManagedMouthSprites(normalMouthSprites);
         }
@@ -612,6 +621,15 @@ JSONフォーマット例:
     syncMouth();
   };
 
+  interface ActiveVideoAsset {
+    videoUrl: string;
+    track: MouthTrack | null;
+    emotion: Emotion;
+  }
+
+  const videoAsset0Ref = useRef<ActiveVideoAsset | null>(null);
+  const videoAsset1Ref = useRef<ActiveVideoAsset | null>(null);
+
   const activeVideoIndexRef = useRef<0 | 1>(0);
   const runtimeVideoRef0 = useRef<HTMLVideoElement | null>(null);
   const runtimeVideoRef1 = useRef<HTMLVideoElement | null>(null);
@@ -639,8 +657,12 @@ JSONフォーマット例:
   };
 
   const handleVideoEnded = async () => {
-    const currentVideo = getActiveVideo();
-    const nextVideo = getInactiveVideo();
+    const activeIdx = activeVideoIndexRef.current;
+    const currentVideo = activeIdx === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+    const nextVideo = activeIdx === 0 ? runtimeVideoRef1.current : runtimeVideoRef0.current;
+    const nextAssetRef = activeIdx === 0 ? videoAsset1Ref : videoAsset0Ref;
+    const currentAssetRef = activeIdx === 0 ? videoAsset0Ref : videoAsset1Ref;
+
     if (!currentVideo || !nextVideo) return;
 
     const pending = pendingSpeechRef.current;
@@ -652,11 +674,16 @@ JSONフォーマット例:
       }
 
       if (asset && asset.videoUrl) {
+        nextAssetRef.current = {
+          videoUrl: asset.videoUrl,
+          track: asset.track,
+          emotion: nextEmotion,
+        };
+
         setCurrentEmotion(nextEmotion);
         setMouthlessUrl(asset.videoUrl);
         setTrack(asset.track);
 
-        // Preload on inactive video
         nextVideo.src = asset.videoUrl;
         nextVideo.load();
         await waitForEvent(nextVideo, "canplay");
@@ -665,19 +692,23 @@ JSONフォーマット例:
       await playAudioAndSyncMouth(pending.audioBuffer);
       setPendingSpeech(null);
       
-      // Start playback and swap immediately
       void nextVideo.play();
       switchActiveVideo();
     } else {
-      // 発話中でなく、かつ現在の感情が通常(normal)以外の場合、通常(normal)に戻す
-      if (!isSpeakingRef.current && currentEmotion !== "normal") {
+      const currentAsset = currentAssetRef.current;
+      if (!isSpeakingRef.current && currentAsset && currentAsset.emotion !== "normal") {
         const normalAsset = emotionAssets["normal"];
         if (normalAsset && normalAsset.videoUrl) {
+          nextAssetRef.current = {
+            videoUrl: normalAsset.videoUrl,
+            track: normalAsset.track,
+            emotion: "normal",
+          };
+
           setCurrentEmotion("normal");
           setMouthlessUrl(normalAsset.videoUrl);
           setTrack(normalAsset.track);
 
-          // Preload on inactive video
           nextVideo.src = normalAsset.videoUrl;
           nextVideo.load();
           await waitForEvent(nextVideo, "canplay");
@@ -726,9 +757,18 @@ JSONフォーマット例:
   const runtimeImageCacheRef = useRef<Record<string, HTMLImageElement>>({});
 
   const updateRuntimeCanvas = () => {
-    const video = getActiveVideo();
+    const activeIdx = activeVideoIndexRef.current;
+    const video = activeIdx === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
     const canvas = runtimeCanvasRef.current;
-    if (!video || !canvas || !track?.frames.length) return;
+    const activeAsset = activeIdx === 0 ? videoAsset0Ref.current : videoAsset1Ref.current;
+
+    if (!video || !canvas || video.videoWidth === 0 || !activeAsset || !activeAsset.track?.frames.length) {
+      if (canvas) {
+        const ctx = canvas.getContext("2d");
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      return;
+    }
 
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
@@ -740,15 +780,16 @@ JSONフォーマット例:
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    const trackObj = activeAsset.track;
     const frameIndex = Math.min(
-      track.frames.length - 1,
-      Math.max(0, Math.floor(video.currentTime * track.fps))
+      trackObj.frames.length - 1,
+      Math.max(0, Math.floor(video.currentTime * trackObj.fps))
     );
-    const frame = track.frames[frameIndex];
+    const frame = trackObj.frames[frameIndex];
 
     if (frame?.valid && frame.quad) {
       const spriteName = activeMouthShape.toLowerCase();
-      const currentSprites = emotionAssets[currentEmotion]?.mouthSprites;
+      const currentSprites = emotionAssets[activeAsset.emotion]?.mouthSprites;
       const normalSprites = emotionAssets["normal"]?.mouthSprites;
       const activeSprites = (currentSprites && currentSprites.length > 0)
         ? currentSprites
@@ -775,7 +816,7 @@ JSONフォーマット例:
   };
 
   useEffect(() => {
-    if (mode !== "runtime" || !mouthlessUrl) {
+    if (mode !== "runtime") {
       if (runtimeLoopRef.current) {
         cancelAnimationFrame(runtimeLoopRef.current);
         runtimeLoopRef.current = 0;
@@ -797,7 +838,7 @@ JSONフォーマット例:
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, mouthlessUrl, track, activeMouthShape, mouthSprites, currentEmotion, emotionAssets]);
+  }, [mode, activeMouthShape, mouthSprites, emotionAssets]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2204,7 +2245,6 @@ JSONフォーマット例:
                     ref={runtimeVideoRef0}
                     className="pointer-events-none absolute inset-0 w-full h-full object-contain transition-opacity duration-150"
                     style={{ opacity: activeVideoIndex === 0 ? 1 : 0 }}
-                    src={mouthlessUrl}
                     autoPlay
                     loop={false}
                     muted
