@@ -94,6 +94,77 @@ const isImportableQuad = (value: unknown): value is Quad =>
       point.every((coordinate) => Number.isFinite(coordinate)),
   );
 
+type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
+
+// IndexedDB Helper Functions
+const DB_NAME = "AITuberMakerAssets";
+const DB_VERSION = 1;
+const STORE_NAME = "assets";
+
+function initDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !window.indexedDB) {
+      reject(new Error("IndexedDB is not supported"));
+      return;
+    }
+    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+}
+
+function getAsset<T>(key: string): Promise<T | null> {
+  return initDb().then((db) => {
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readonly");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.get(key);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve((request.result as T) || null);
+    });
+  });
+}
+
+function setAsset<T>(key: string, value: T): Promise<void> {
+  return initDb().then((db) => {
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.put(value, key);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+  });
+}
+
+interface EmotionAsset {
+  videoUrl: string;
+  track: MouthTrack | null;
+  videoName?: string;
+  trackName?: string;
+  mouthSprites?: GeneratedSprite[];
+}
+
+interface PendingSpeech {
+  emotion: Emotion;
+  text: string;
+  audioBuffer: ArrayBuffer;
+}
+
+const EMOTIONS: { key: Emotion; label: string }[] = [
+  { key: "normal", label: "通常" },
+  { key: "happy", label: "嬉しい" },
+  { key: "angry", label: "怒り" },
+  { key: "surprised", label: "驚き" },
+  { key: "sad", label: "悲しい" },
+];
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("materials");
   const [isHeaderVisible, setIsHeaderVisible] = useState(true);
@@ -101,6 +172,7 @@ export default function Home() {
   const [videoUrl, setVideoUrl] = useState("");
   const [videoMeta, setVideoMeta] = useState({ width: 0, height: 0, duration: 0 });
   const [analysisFps, setAnalysisFps] = useState(24);
+  const [smoothCutoff, setSmoothCutoff] = useState(3.0);
   const [speedMode, setSpeedMode] = useState<SpeedMode>("balanced");
   const [isDragging, setIsDragging] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -135,6 +207,22 @@ export default function Home() {
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
+  const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
+
+  const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
+    normal: { videoUrl: "", track: null, mouthSprites: [] },
+    happy: { videoUrl: "", track: null, mouthSprites: [] },
+    angry: { videoUrl: "", track: null, mouthSprites: [] },
+    surprised: { videoUrl: "", track: null, mouthSprites: [] },
+    sad: { videoUrl: "", track: null, mouthSprites: [] },
+  });
+  const [currentEmotion, setCurrentEmotion] = useState<Emotion>("normal");
+  const [pendingSpeech, setPendingSpeech] = useState<PendingSpeech | null>(null);
+  const pendingSpeechRef = useRef<PendingSpeech | null>(null);
+
+  useEffect(() => {
+    pendingSpeechRef.current = pendingSpeech;
+  }, [pendingSpeech]);
 
   const [runtimeBgType, setRuntimeBgType] = useState<"color" | "image">("color");
   const [runtimeBgColor, setRuntimeBgColor] = useState("#f7f8fb");
@@ -181,8 +269,42 @@ export default function Home() {
     }
   };
 
+  const mouthSpriteUrlsRef = useRef<string[]>([]);
+  const emotionVideoUrlsRef = useRef<Record<Emotion, string>>({
+    normal: "",
+    happy: "",
+    angry: "",
+    surprised: "",
+    sad: "",
+  });
+  const emotionMouthSpriteUrlsRef = useRef<string[]>([]);
+
+  const setManagedMouthSprites = (nextSprites: GeneratedSprite[]) => {
+    const nextUrls = new Set(nextSprites.map((sprite) => sprite.url));
+    const urlsToRevoke = mouthSpriteUrlsRef.current.filter((url) => !nextUrls.has(url));
+    urlsToRevoke.forEach(revokeObjectUrl);
+    mouthSpriteUrlsRef.current = nextSprites.map((sprite) => sprite.url);
+    setMouthSprites(nextSprites);
+  };
+
+  // Helper to save emotion asset files to IndexedDB
+  const saveEmotionAssetToDb = async (emotion: Emotion, type: "video" | "track" | "mouthSprite", fileOrData: File | MouthTrack, spriteName?: MouthSpriteName, trackName?: string) => {
+    try {
+      const dbKey = `emotion_${emotion}_${type}${spriteName ? `_${spriteName}` : ""}`;
+      if (type === "video" || type === "mouthSprite") {
+        const file = fileOrData as File;
+        await setAsset(dbKey, { file, name: file.name });
+      } else if (type === "track") {
+        const trackData = fileOrData as MouthTrack;
+        await setAsset(dbKey, { track: trackData, name: trackName || "mouth_track.json" });
+      }
+    } catch (err) {
+      console.error(`Failed to save asset ${type} for ${emotion} to IndexedDB:`, err);
+    }
+  };
+
   useEffect(() => {
-    window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(async () => {
       const key = localStorage.getItem("openai_api_key") || "";
       const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
       const tts = (localStorage.getItem("tts_type") as "aivis" | "voicevox" | "custom") || "aivis";
@@ -205,8 +327,93 @@ export default function Home() {
       if (key) {
         void fetchOpenaiModels(key);
       }
+
+      // Load saved assets from IndexedDB
+      try {
+        const loadedAssets: Record<Emotion, EmotionAsset> = {
+          normal: { videoUrl: "", track: null, mouthSprites: [] },
+          happy: { videoUrl: "", track: null, mouthSprites: [] },
+          angry: { videoUrl: "", track: null, mouthSprites: [] },
+          surprised: { videoUrl: "", track: null, mouthSprites: [] },
+          sad: { videoUrl: "", track: null, mouthSprites: [] },
+        };
+
+        let normalTrack: MouthTrack | null = null;
+        const normalMouthSprites: GeneratedSprite[] = [];
+
+        for (const emotion of EMOTIONS.map(e => e.key)) {
+          // 1. Video
+          const videoData = await getAsset<{ file: File; name: string }>(`emotion_${emotion}_video`);
+          if (videoData) {
+            const url = URL.createObjectURL(videoData.file);
+            loadedAssets[emotion].videoUrl = url;
+            loadedAssets[emotion].videoName = videoData.name;
+            emotionVideoUrlsRef.current[emotion] = url;
+            if (emotion === "normal") {
+              setMouthlessUrl(url);
+            }
+          }
+
+          // 2. Track JSON
+          const trackData = await getAsset<{ track: MouthTrack; name: string }>(`emotion_${emotion}_track`);
+          if (trackData) {
+            loadedAssets[emotion].track = trackData.track;
+            loadedAssets[emotion].trackName = trackData.name;
+            if (emotion === "normal") {
+              normalTrack = trackData.track;
+            }
+          }
+
+          // 3. Mouth Sprites
+          const sprites: GeneratedSprite[] = [];
+          for (const name of mouthSpriteNames) {
+            const spriteData = await getAsset<{ file: File; name: string }>(`emotion_${emotion}_mouthSprite_${name}`);
+            if (spriteData) {
+              const url = URL.createObjectURL(spriteData.file);
+              emotionMouthSpriteUrlsRef.current.push(url);
+              const sprite: GeneratedSprite = {
+                name,
+                url,
+                frameIndex: 0,
+                width: 0,
+                height: 0,
+              };
+              sprites.push(sprite);
+              if (emotion === "normal") {
+                normalMouthSprites.push(sprite);
+              }
+            }
+          }
+          loadedAssets[emotion].mouthSprites = sprites;
+        }
+
+        setEmotionAssets(loadedAssets);
+        if (normalTrack) {
+          setTrack(normalTrack);
+        }
+        if (normalMouthSprites.length > 0) {
+          setManagedMouthSprites(normalMouthSprites);
+        }
+      } catch (err) {
+        console.error("Failed to restore saved assets from IndexedDB:", err);
+      }
     });
   }, []);
+
+  useEffect(() => {
+    if (mode === "runtime" && emotionAssets.normal?.videoUrl && runtimeVideoRef0.current) {
+      if (!videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
+        videoAsset0Ref.current = {
+          videoUrl: emotionAssets.normal.videoUrl,
+          track: emotionAssets.normal.track,
+          emotion: "normal",
+        };
+        runtimeVideoRef0.current.src = emotionAssets.normal.videoUrl;
+        runtimeVideoRef0.current.load();
+        void runtimeVideoRef0.current.play();
+      }
+    }
+  }, [mode, emotionAssets]);
 
   const handleOpenaiKeyChange = (key: string) => {
     setOpenaiApiKey(key);
@@ -262,7 +469,27 @@ export default function Home() {
         },
         body: JSON.stringify({
           model: openaiModel,
-          messages: [{ role: "user", content: chatInput }],
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content: `あなたはAITuberのキャラクターとして振る舞ってください。ユーザーとの対話において、キャラクターとしての返答本文と、その返答の感情（通常、嬉しい、怒り、驚き、悲しい）を、必ず以下のJSONフォーマットで返却してください。
+
+JSONフォーマット例:
+{
+  "emotion": "嬉しい",
+  "text": "こんにちは！お話しできてとても嬉しいです！"
+}
+
+感情の選択肢（値は以下のいずれか1つのみにしてください）:
+- "通常"
+- "嬉しい"
+- "怒り"
+- "驚き"
+- "悲しい"`,
+            },
+            { role: "user", content: chatInput },
+          ],
         }),
       });
 
@@ -278,15 +505,32 @@ export default function Home() {
       }
 
       const chatData = await chatRes.json();
-      const replyText = chatData.choices[0].message.content;
-      setLastReply(replyText);
+      const replyJson = chatData.choices[0].message.content;
+      
+      let emotion: Emotion = "normal";
+      let cleanText = "";
+      try {
+        const parsed = JSON.parse(replyJson);
+        cleanText = parsed.text || "";
+        const emotionStr = parsed.emotion;
+        if (emotionStr === "嬉しい") emotion = "happy";
+        else if (emotionStr === "怒り") emotion = "angry";
+        else if (emotionStr === "驚き") emotion = "surprised";
+        else if (emotionStr === "悲しい") emotion = "sad";
+        else emotion = "normal";
+      } catch (err) {
+        console.error("Failed to parse OpenAI JSON response:", err);
+        cleanText = replyJson;
+      }
+
+      setLastReply(cleanText);
 
       // 2. Aivis Speech synthesis
       const synthRes = await fetch("/api/aivis/synthesis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: replyText,
+          text: cleanText,
           speaker: Number(selectedSpeaker),
           aivisUrl,
         }),
@@ -298,8 +542,12 @@ export default function Home() {
 
       const audioBuffer = await synthRes.arrayBuffer();
 
-      // 3. Play and sync mouth
-      await playAudioAndSyncMouth(audioBuffer);
+      // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
+      setPendingSpeech({
+        emotion,
+        text: cleanText,
+        audioBuffer,
+      });
 
       setChatInput("");
     } catch (err) {
@@ -309,6 +557,8 @@ export default function Home() {
       setIsChatSending(false);
     }
   };
+
+  const isSpeakingRef = useRef<boolean>(false);
 
   const playAudioAndSyncMouth = async (audioBuffer: ArrayBuffer) => {
     const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
@@ -369,10 +619,114 @@ export default function Home() {
       cancelAnimationFrame(animationFrameId);
       setActiveMouthShape("closed");
       audioCtx.close();
+      isSpeakingRef.current = false;
     };
 
+    isSpeakingRef.current = true;
     source.start(0);
     syncMouth();
+  };
+
+  interface ActiveVideoAsset {
+    videoUrl: string;
+    track: MouthTrack | null;
+    emotion: Emotion;
+  }
+
+  const videoAsset0Ref = useRef<ActiveVideoAsset | null>(null);
+  const videoAsset1Ref = useRef<ActiveVideoAsset | null>(null);
+
+  const activeVideoIndexRef = useRef<0 | 1>(0);
+  const runtimeVideoRef0 = useRef<HTMLVideoElement | null>(null);
+  const runtimeVideoRef1 = useRef<HTMLVideoElement | null>(null);
+
+  const getActiveVideo = () => {
+    return activeVideoIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+  };
+
+  const getInactiveVideo = () => {
+    return activeVideoIndex === 0 ? runtimeVideoRef1.current : runtimeVideoRef0.current;
+  };
+
+  const switchActiveVideo = () => {
+    const activeIndex = activeVideoIndexRef.current;
+    const nextIndex = activeIndex === 0 ? 1 : 0;
+    
+    const prevVideo = activeIndex === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+    if (prevVideo) {
+      // Stop previous video to save performance
+      prevVideo.pause();
+    }
+    
+    activeVideoIndexRef.current = nextIndex;
+    setActiveVideoIndex(nextIndex);
+  };
+
+  const handleVideoEnded = async () => {
+    const activeIdx = activeVideoIndexRef.current;
+    const currentVideo = activeIdx === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
+    const nextVideo = activeIdx === 0 ? runtimeVideoRef1.current : runtimeVideoRef0.current;
+    const nextAssetRef = activeIdx === 0 ? videoAsset1Ref : videoAsset0Ref;
+    const currentAssetRef = activeIdx === 0 ? videoAsset0Ref : videoAsset1Ref;
+
+    if (!currentVideo || !nextVideo) return;
+
+    const pending = pendingSpeechRef.current;
+    if (pending) {
+      const nextEmotion = pending.emotion;
+      let asset = emotionAssets[nextEmotion];
+      if (!asset || !asset.videoUrl) {
+        asset = emotionAssets["normal"];
+      }
+
+      if (asset && asset.videoUrl) {
+        nextAssetRef.current = {
+          videoUrl: asset.videoUrl,
+          track: asset.track,
+          emotion: nextEmotion,
+        };
+
+        setCurrentEmotion(nextEmotion);
+        setMouthlessUrl(asset.videoUrl);
+        setTrack(asset.track);
+
+        nextVideo.src = asset.videoUrl;
+        nextVideo.load();
+        await waitForEvent(nextVideo, "canplay");
+      }
+
+      await playAudioAndSyncMouth(pending.audioBuffer);
+      setPendingSpeech(null);
+      
+      void nextVideo.play();
+      switchActiveVideo();
+    } else {
+      const currentAsset = currentAssetRef.current;
+      if (!isSpeakingRef.current && currentAsset && currentAsset.emotion !== "normal") {
+        const normalAsset = emotionAssets["normal"];
+        if (normalAsset && normalAsset.videoUrl) {
+          nextAssetRef.current = {
+            videoUrl: normalAsset.videoUrl,
+            track: normalAsset.track,
+            emotion: "normal",
+          };
+
+          setCurrentEmotion("normal");
+          setMouthlessUrl(normalAsset.videoUrl);
+          setTrack(normalAsset.track);
+
+          nextVideo.src = normalAsset.videoUrl;
+          nextVideo.load();
+          await waitForEvent(nextVideo, "canplay");
+          
+          void nextVideo.play();
+          switchActiveVideo();
+        }
+      } else {
+        currentVideo.currentTime = 0;
+        void currentVideo.play();
+      }
+    }
   };
 
   const [scale, setScale] = useState(1);
@@ -403,16 +757,24 @@ export default function Home() {
     setScale(nextScale);
   };
 
-  const runtimeVideoRef = useRef<HTMLVideoElement | null>(null);
   const runtimeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [activeMouthShape, setActiveMouthShape] = useState<string>("closed");
   const runtimeLoopRef = useRef<number>(0);
   const runtimeImageCacheRef = useRef<Record<string, HTMLImageElement>>({});
 
   const updateRuntimeCanvas = () => {
-    const video = runtimeVideoRef.current;
+    const activeIdx = activeVideoIndexRef.current;
+    const video = activeIdx === 0 ? runtimeVideoRef0.current : runtimeVideoRef1.current;
     const canvas = runtimeCanvasRef.current;
-    if (!video || !canvas || !track?.frames.length) return;
+    const activeAsset = activeIdx === 0 ? videoAsset0Ref.current : videoAsset1Ref.current;
+
+    if (!video || !canvas || video.videoWidth === 0 || !activeAsset || !activeAsset.track?.frames.length) {
+      if (canvas) {
+        const ctx = canvas.getContext("2d");
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      return;
+    }
 
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
@@ -424,16 +786,25 @@ export default function Home() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    const trackObj = activeAsset.track;
     const frameIndex = Math.min(
-      track.frames.length - 1,
-      Math.max(0, Math.floor(video.currentTime * track.fps))
+      trackObj.frames.length - 1,
+      Math.max(0, Math.floor(video.currentTime * trackObj.fps))
     );
-    const frame = track.frames[frameIndex];
+    const frame = trackObj.frames[frameIndex];
 
     if (frame?.valid && frame.quad) {
       const spriteName = activeMouthShape.toLowerCase();
-      const sprite = mouthSprites.find((s) => s.name.toLowerCase() === spriteName) ||
-                     mouthSprites.find((s) => s.name.toLowerCase() === "closed");
+      const currentSprites = emotionAssets[activeAsset.emotion]?.mouthSprites;
+      const normalSprites = emotionAssets["normal"]?.mouthSprites;
+      const activeSprites = (currentSprites && currentSprites.length > 0)
+        ? currentSprites
+        : (normalSprites && normalSprites.length > 0)
+          ? normalSprites
+          : mouthSprites;
+
+      const sprite = activeSprites.find((s) => s.name.toLowerCase() === spriteName) ||
+                     activeSprites.find((s) => s.name.toLowerCase() === "closed");
 
       if (sprite) {
         let img = runtimeImageCacheRef.current[sprite.url];
@@ -451,7 +822,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (mode !== "runtime" || !mouthlessUrl) {
+    if (mode !== "runtime") {
       if (runtimeLoopRef.current) {
         cancelAnimationFrame(runtimeLoopRef.current);
         runtimeLoopRef.current = 0;
@@ -473,7 +844,7 @@ export default function Home() {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, mouthlessUrl, track, activeMouthShape, mouthSprites]);
+  }, [mode, activeMouthShape, mouthSprites, emotionAssets]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -485,7 +856,6 @@ export default function Home() {
   const animationFrameRef = useRef(0);
   const videoUrlRef = useRef("");
   const downloadUrlRef = useRef("");
-  const mouthSpriteUrlsRef = useRef<string[]>([]);
   const mouthlessUrlRef = useRef("");
 
   const setManagedVideoUrl = (nextUrl: string) => {
@@ -500,11 +870,7 @@ export default function Home() {
     setDownloadUrl(nextUrl);
   };
 
-  const setManagedMouthSprites = (nextSprites: GeneratedSprite[]) => {
-    mouthSpriteUrlsRef.current.forEach(revokeObjectUrl);
-    mouthSpriteUrlsRef.current = nextSprites.map((sprite) => sprite.url);
-    setMouthSprites(nextSprites);
-  };
+
 
   const setManagedMouthlessUrl = (nextUrl: string) => {
     revokeObjectUrl(mouthlessUrlRef.current);
@@ -527,6 +893,282 @@ export default function Home() {
       setManagedMouthlessUrl(url);
       setMouthlessStatus("アップロード完了");
     }
+  };
+
+  const handleEmotionVideoUpload = (emotion: Emotion, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const isChromeVideo = file.type === "video/webm" || 
+                            file.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(file.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        event.target.value = "";
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      
+      // Revoke old URL if exists
+      const oldUrl = emotionVideoUrlsRef.current[emotion];
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      emotionVideoUrlsRef.current[emotion] = url;
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          videoUrl: url,
+          videoName: file.name,
+        },
+      }));
+
+      // If configuring normal, sync with mouthlessUrl
+      if (emotion === "normal") {
+        setMouthlessUrl(url);
+      }
+      void saveEmotionAssetToDb(emotion, "video", file);
+    }
+  };
+
+  const handleEmotionTrackUpload = async (emotion: Emotion, event: ChangeEvent<HTMLInputElement>) => {
+    const jsonFile = event.target.files?.[0];
+    if (!jsonFile) return;
+
+    try {
+      const parsed = JSON.parse(await jsonFile.text()) as MouthTrack;
+      if (
+        !Number.isFinite(parsed.fps) ||
+        !Number.isFinite(parsed.width) ||
+        !Number.isFinite(parsed.height) ||
+        !Array.isArray(parsed.frames)
+      ) {
+        throw new Error("mouth_track.json の形式が違います");
+      }
+
+      const normalizedTrack: MouthTrack = {
+        fps: parsed.fps,
+        width: parsed.width,
+        height: parsed.height,
+        detector: parsed.detector ?? {
+          name: "imported mouth_track.json",
+          runtime: "unknown",
+          backend: "unknown",
+          processor: "import",
+          analysisFps: parsed.fps,
+          speedMode: "balanced",
+        },
+        frames: parsed.frames.map((frame, index) => {
+          if (!isImportableQuad(frame.quad)) {
+            throw new Error(`mouth_track.json の ${index} 番目のquadが不正です`);
+          }
+
+          return {
+            index: Number.isFinite(frame.index) ? frame.index : index,
+            quad: clampQuad(frame.quad, parsed.width, parsed.height),
+            valid: Boolean(frame.valid),
+            confidence: Number(frame.confidence) || 0,
+            source: frame.source || "import",
+            processor: frame.processor || "import",
+          };
+        }),
+      };
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          track: normalizedTrack,
+          trackName: jsonFile.name,
+        },
+      }));
+
+      if (emotion === "normal") {
+        setTrack(normalizedTrack);
+      }
+      void saveEmotionAssetToDb(emotion, "track", normalizedTrack, undefined, jsonFile.name);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const handleEmotionMouthSpriteUpload = (emotion: Emotion, name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    emotionMouthSpriteUrlsRef.current.push(url);
+
+    const newSprite: GeneratedSprite = {
+      name,
+      url,
+      frameIndex: 0,
+      width: 0,
+      height: 0,
+    };
+
+    setEmotionAssets((prev) => {
+      const currentSprites = prev[emotion].mouthSprites || [];
+      const updatedSprites = [
+        ...currentSprites.filter((s) => s.name !== name),
+        newSprite,
+      ];
+      return {
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          mouthSprites: updatedSprites,
+        },
+      };
+    });
+
+    if (emotion === "normal") {
+      setManagedMouthSprites([
+        ...mouthSprites.filter((s) => s.name !== name),
+        newSprite,
+      ]);
+    }
+    void saveEmotionAssetToDb(emotion, "mouthSprite", file, name);
+  };
+
+  const handleEmotionVideoDrop = (emotion: Emotion, event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (file) {
+      const isChromeVideo = file.type === "video/webm" || 
+                            file.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(file.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      
+      const oldUrl = emotionVideoUrlsRef.current[emotion];
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      emotionVideoUrlsRef.current[emotion] = url;
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          videoUrl: url,
+          videoName: file.name,
+        },
+      }));
+
+      if (emotion === "normal") {
+        setMouthlessUrl(url);
+      }
+      void saveEmotionAssetToDb(emotion, "video", file);
+    }
+  };
+
+  const handleEmotionTrackDrop = async (emotion: Emotion, event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const jsonFile = event.dataTransfer.files?.[0];
+    if (!jsonFile) return;
+
+    try {
+      const parsed = JSON.parse(await jsonFile.text()) as MouthTrack;
+      if (
+        !Number.isFinite(parsed.fps) ||
+        !Number.isFinite(parsed.width) ||
+        !Number.isFinite(parsed.height) ||
+        !Array.isArray(parsed.frames)
+      ) {
+        throw new Error("mouth_track.json の形式が違います");
+      }
+
+      const normalizedTrack: MouthTrack = {
+        fps: parsed.fps,
+        width: parsed.width,
+        height: parsed.height,
+        detector: parsed.detector ?? {
+          name: "imported mouth_track.json",
+          runtime: "unknown",
+          backend: "unknown",
+          processor: "import",
+          analysisFps: parsed.fps,
+          speedMode: "balanced",
+        },
+        frames: parsed.frames.map((frame, index) => {
+          if (!isImportableQuad(frame.quad)) {
+            throw new Error(`mouth_track.json の ${index} 番目のquadが不正です`);
+          }
+
+          return {
+            index: Number.isFinite(frame.index) ? frame.index : index,
+            quad: clampQuad(frame.quad, parsed.width, parsed.height),
+            valid: Boolean(frame.valid),
+            confidence: Number(frame.confidence) || 0,
+            source: frame.source || "import",
+            processor: frame.processor || "import",
+          };
+        }),
+      };
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          track: normalizedTrack,
+          trackName: jsonFile.name,
+        },
+      }));
+
+      if (emotion === "normal") {
+        setTrack(normalizedTrack);
+      }
+      void saveEmotionAssetToDb(emotion, "track", normalizedTrack, undefined, jsonFile.name);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
+    }
+  };
+
+  const handleEmotionMouthSpriteDrop = (emotion: Emotion, name: MouthSpriteName, event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      alert("画像ファイル（PNG等）をアップロードしてください。");
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    emotionMouthSpriteUrlsRef.current.push(url);
+
+    const newSprite: GeneratedSprite = {
+      name,
+      url,
+      frameIndex: 0,
+      width: 0,
+      height: 0,
+    };
+
+    setEmotionAssets((prev) => {
+      const currentSprites = prev[emotion].mouthSprites || [];
+      const updatedSprites = [
+        ...currentSprites.filter((s) => s.name !== name),
+        newSprite,
+      ];
+      return {
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          mouthSprites: updatedSprites,
+        },
+      };
+    });
+
+    if (emotion === "normal") {
+      setManagedMouthSprites([
+        ...mouthSprites.filter((s) => s.name !== name),
+        newSprite,
+      ]);
+    }
+    void saveEmotionAssetToDb(emotion, "mouthSprite", file, name);
   };
 
   const handleMouthSpriteUpload = (name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
@@ -582,12 +1224,18 @@ export default function Home() {
   }, [track]);
 
   useEffect(() => {
+    const emotionVideoUrls = emotionVideoUrlsRef.current;
+    const emotionMouthSpriteUrls = emotionMouthSpriteUrlsRef.current;
     return () => {
       revokeObjectUrl(videoUrlRef.current);
       revokeObjectUrl(downloadUrlRef.current);
       mouthSpriteUrlsRef.current.forEach(revokeObjectUrl);
       revokeObjectUrl(mouthlessUrlRef.current);
       revokeObjectUrl(runtimeBgImageUrlRef.current);
+      Object.values(emotionVideoUrls).forEach(url => {
+        if (url) revokeObjectUrl(url);
+      });
+      emotionMouthSpriteUrls.forEach(revokeObjectUrl);
       workerRef.current?.terminate();
       cancelScheduledFrameSync();
     };
@@ -922,7 +1570,7 @@ export default function Home() {
         };
         return framesByIndex.get(index) ?? fallback;
       });
-      const processed = postProcessTrackFrames(rawFrames, effectiveFps, 0);
+      const processed = postProcessTrackFrames(rawFrames, effectiveFps, smoothCutoff);
       const resampled = resampleTrackFrames(processed.frames, effectiveFps, targetFps, videoMeta.duration);
       const frames = resampled.frames.map((frame, index) => ({
         ...frame,
@@ -1054,6 +1702,18 @@ export default function Home() {
       if (!restore.wasPaused) video.play().catch(() => {});
       setIsExtractingMouth(false);
     }
+  };
+
+  const downloadAllMouthSprites = () => {
+    mouthSpriteNames.forEach((name) => {
+      const sprite = mouthSprites.find((s) => s.name === name);
+      if (sprite) {
+        const link = document.createElement("a");
+        link.href = sprite.url;
+        link.download = `${name}.png`;
+        link.click();
+      }
+    });
   };
 
   const createMouthlessFrame = (
@@ -1411,6 +2071,23 @@ export default function Home() {
                   ))}
                 </select>
               </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium flex items-center justify-between">
+                  <span>ブレ防止強度 (滑らかさ)</span>
+                  <span className="text-xs font-semibold text-teal-600">{smoothCutoff.toFixed(1)} Hz</span>
+                </span>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min="0"
+                    max="8"
+                    step="0.5"
+                    className="flex-1 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-teal-600"
+                    value={smoothCutoff}
+                    onChange={(event) => setSmoothCutoff(Number(event.target.value))}
+                  />
+                </div>
+              </label>
               <div className="h-2 rounded-full bg-slate-100">
                 <div className="h-full rounded-full bg-teal-600 transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
               </div>
@@ -1442,14 +2119,24 @@ export default function Home() {
 
               <div className="h-px bg-slate-200" />
               <PanelTitle icon={<Image />} title="口PNG差分" badge={mouthStatus} />
-              <button
-                className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={!track || !videoUrl || isExtractingMouth || isRunningAll}
-                onClick={() => void extractMouthSprites()}
-              >
-                <Play className="size-4" />
-                5種を自動抽出
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className="flex items-center justify-center gap-2 rounded-md bg-teal-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  disabled={!track || !videoUrl || isExtractingMouth || isRunningAll}
+                  onClick={() => void extractMouthSprites()}
+                >
+                  <Play className="size-4" />
+                  5種を自動抽出
+                </button>
+                <button
+                  className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  disabled={mouthSprites.length === 0}
+                  onClick={downloadAllMouthSprites}
+                >
+                  <Download className="size-4" />
+                  一括保存
+                </button>
+              </div>
               <div className="grid grid-cols-5 gap-2">
                 {mouthSpriteNames.map((name) => {
                   const sprite = mouthSprites.find((s) => s.name === name);
@@ -1466,6 +2153,20 @@ export default function Home() {
                       />
                       {sprite ? (
                         <>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              const link = document.createElement("a");
+                              link.href = sprite.url;
+                              link.download = `${name}.png`;
+                              link.click();
+                            }}
+                            className="absolute top-1 right-1 z-10 rounded-full bg-slate-900/80 p-1 text-white hover:bg-slate-900 opacity-0 group-hover:opacity-100 transition"
+                          >
+                            <Download className="size-3" />
+                          </button>
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img className="aspect-square w-full rounded bg-white object-contain" src={sprite.url} alt={`${name} mouth`} />
                           <span className="truncate text-slate-700">{name}</span>
@@ -1535,24 +2236,42 @@ export default function Home() {
                   transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
                   transformOrigin: "center center",
                   cursor: isDraggingVideo ? "grabbing" : "grab",
+                  width: videoMeta.width ? `${videoMeta.width}px` : "800px",
+                  height: videoMeta.height ? `${videoMeta.height}px` : "450px",
+                  maxWidth: "90vw",
+                  maxHeight: "80vh",
+                  aspectRatio: videoMeta.width && videoMeta.height ? `${videoMeta.width} / ${videoMeta.height}` : "16/9",
                 }}
-                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none"
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden bg-black"
                 onMouseDown={handleMouseDown}
                 onWheel={handleWheel}
               >
-                <video
-                  ref={runtimeVideoRef}
-                  className="pointer-events-none max-w-4xl"
-                  src={mouthlessUrl}
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                />
-                <canvas
-                  ref={runtimeCanvasRef}
-                  className="pointer-events-none absolute left-0 top-0 w-full h-full"
-                />
+                 <div className="relative w-full h-full">
+                  <video
+                    ref={runtimeVideoRef0}
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain"
+                    style={{ opacity: activeVideoIndex === 0 ? 1 : 0 }}
+                    autoPlay
+                    loop={false}
+                    muted
+                    playsInline
+                    onEnded={handleVideoEnded}
+                  />
+                  <video
+                    ref={runtimeVideoRef1}
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain"
+                    style={{ opacity: activeVideoIndex === 1 ? 1 : 0 }}
+                    autoPlay
+                    loop={false}
+                    muted
+                    playsInline
+                    onEnded={handleVideoEnded}
+                  />
+                  <canvas
+                    ref={runtimeCanvasRef}
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain"
+                  />
+                </div>
               </div>
             )}
 
@@ -1560,8 +2279,11 @@ export default function Home() {
             <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 flex flex-col items-center gap-4">
               {/* Latest Reply Bubble */}
               {lastReply && (
-                <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all">
-                  {lastReply}
+                <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all relative">
+                  <div className="absolute -top-2.5 left-4 px-2 py-0.5 rounded bg-teal-600 text-[10px] font-bold text-white shadow-sm">
+                    {EMOTIONS.find(e => e.key === currentEmotion)?.label || "通常"}
+                  </div>
+                  <div className="mt-1">{lastReply}</div>
                 </div>
               )}
 
@@ -1592,7 +2314,7 @@ export default function Home() {
         )}
 
         {mode === "settings" && (
-          <section className="mx-auto w-full max-w-2xl flex-1 px-5 pt-24 pb-4">
+          <section className="mx-auto w-full max-w-4xl flex-1 px-5 pt-24 pb-4">
             <div className="rounded-md border border-slate-200 bg-white p-6 shadow-sm">
               <PanelTitle icon={<Settings />} title="連携設定" badge="連携設定" />
               
@@ -1702,6 +2424,205 @@ export default function Home() {
                     )}
                   </select>
                 </div>
+
+                {/* Emotion Assets Settings */}
+                <div className="h-px bg-slate-200 my-4" />
+                
+                <div className="grid gap-4">
+                  <label className="text-sm font-semibold text-slate-800">感情別キャラクター素材設定</label>
+                  <p className="text-xs text-slate-500">AIの感情表現に合わせて切り替えるための「口無し動画」と「口位置追跡データ（mouth_track.json）」を設定します。</p>
+                  
+                  <div className="space-y-4">
+                    {EMOTIONS.map((emotion) => {
+                      const asset = emotionAssets[emotion.key];
+                      const isNormal = emotion.key === "normal";
+                      const hasVideo = !!asset.videoUrl;
+                      const hasTrack = !!asset.track;
+                      const isComplete = hasVideo && hasTrack;
+
+                      let borderClass = "border-slate-200 bg-slate-50/50";
+                      if (isNormal && !isComplete) {
+                        borderClass = "border-rose-300 bg-rose-50/10 shadow-sm shadow-rose-100/50";
+                      } else if (isComplete) {
+                        borderClass = "border-emerald-200 bg-emerald-50/10";
+                      }
+
+                      let dotColor = "bg-slate-400";
+                      if (isComplete) {
+                        dotColor = "bg-emerald-500";
+                      } else if (isNormal) {
+                        dotColor = "bg-rose-500 animate-pulse";
+                      }
+
+                      return (
+                        <div key={emotion.key} className={`rounded-lg border p-4 space-y-3 transition-colors ${borderClass}`}>
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <span className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                              <span className={`inline-block w-2.5 h-2.5 rounded-full ${dotColor}`} />
+                              {emotion.label} ({emotion.key})
+                            </span>
+                            
+                            {isNormal ? (
+                              isComplete ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                                  <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                  設定済み (必須)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200 animate-pulse">
+                                  <span className="size-1.5 rounded-full bg-rose-500" />
+                                  未設定 (必須)
+                                </span>
+                              )
+                            ) : isComplete ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                                <span className="size-1.5 rounded-full bg-emerald-500" />
+                                個別設定済み
+                              </span>
+                            ) : (hasVideo || hasTrack) ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700 border border-amber-200">
+                                <span className="size-1.5 rounded-full bg-amber-500" />
+                                一部未設定 (通常版で代替)
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 border border-slate-200">
+                                <span className="size-1.5 rounded-full bg-slate-400" />
+                                未設定 (通常版で代替)
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {/* Video Upload */}
+                            <div className="space-y-1">
+                              <span className="text-xs font-semibold text-slate-600 block">口無し動画 (ドラッグ＆ドロップ可)</span>
+                              <label
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.currentTarget.classList.add("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDragLeave={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDrop={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                  handleEmotionVideoDrop(emotion.key, e);
+                                }}
+                                className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasVideo ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}
+                              >
+                                <Video className="size-3.5 flex-shrink-0" />
+                                <span className="truncate flex-1 text-left">
+                                  {asset.videoName || "動画を選択またはドロップ..."}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="video/webm,video/mp4"
+                                  className="sr-only"
+                                  onChange={(e) => handleEmotionVideoUpload(emotion.key, e)}
+                                />
+                              </label>
+                            </div>
+                            
+                            {/* JSON Upload */}
+                            <div className="space-y-1">
+                              <span className="text-xs font-semibold text-slate-600 block">口位置 JSON (ドラッグ＆ドロップ可)</span>
+                              <label
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.currentTarget.classList.add("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDragLeave={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDrop={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                  void handleEmotionTrackDrop(emotion.key, e);
+                                }}
+                                className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasTrack ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}
+                              >
+                                <FileJson className="size-3.5 flex-shrink-0" />
+                                <span className="truncate flex-1 text-left">
+                                  {asset.trackName || "JSONを選択またはドロップ..."}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="application/json"
+                                  className="sr-only"
+                                  onChange={(e) => void handleEmotionTrackUpload(emotion.key, e)}
+                                />
+                              </label>
+                            </div>
+                          </div>
+
+                          {/* Mouth PNG Sprites for this Emotion */}
+                          <div className="pt-2 border-t border-slate-200/60">
+                            <span className="text-xs font-semibold text-slate-600 block mb-2">口パーツ画像（PNG素材 - ドラッグ＆ドロップ可）</span>
+                            <div className="grid grid-cols-5 gap-2">
+                              {mouthSpriteNames.map((name) => {
+                                const currentSprites = asset.mouthSprites || [];
+                                const sprite = currentSprites.find((s) => s.name === name);
+                                return (
+                                  <label
+                                    key={name}
+                                    onDragOver={(e) => {
+                                      e.preventDefault();
+                                      e.currentTarget.classList.add("border-teal-500", "bg-teal-50/20");
+                                    }}
+                                    onDragLeave={(e) => {
+                                      e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                    }}
+                                    onDrop={(e) => {
+                                      e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                      handleEmotionMouthSpriteDrop(emotion.key, name, e);
+                                    }}
+                                    className="group relative grid gap-1 rounded-md border border-dashed border-slate-300 bg-white p-2 text-center text-xs font-semibold cursor-pointer hover:border-teal-500 hover:bg-teal-50/10 transition"
+                                  >
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      className="sr-only"
+                                      onChange={(e) => handleEmotionMouthSpriteUpload(emotion.key, name, e)}
+                                    />
+                                    {sprite ? (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            e.preventDefault();
+                                            const link = document.createElement("a");
+                                            link.href = sprite.url;
+                                            link.download = `${emotion.key}_${name}.png`;
+                                            link.click();
+                                          }}
+                                          className="absolute top-1 right-1 z-10 rounded-full bg-slate-900/80 p-1 text-white hover:bg-slate-900 opacity-0 group-hover:opacity-100 transition"
+                                        >
+                                          <Download className="size-2.5" />
+                                        </button>
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img className="aspect-square w-full rounded bg-slate-50 object-contain border border-slate-100" src={sprite.url} alt={`${name} mouth`} />
+                                        <span className="truncate text-slate-600 text-[9px] mt-0.5">{name}</span>
+                                        <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white opacity-0 group-hover:opacity-100 transition rounded-md text-[9px]">
+                                          変更
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <div className="flex aspect-square w-full flex-col items-center justify-center text-slate-400">
+                                        <Upload className="size-3" />
+                                        <span className="mt-0.5 text-[8px] truncate text-slate-500">{name}</span>
+                                      </div>
+                                    )}
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
 
                 {/* Runtime Background settings */}
                 <div className="h-px bg-slate-200 my-4" />
