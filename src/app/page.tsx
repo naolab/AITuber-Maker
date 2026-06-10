@@ -791,6 +791,142 @@ JSONフォーマット例:
     }
   };
 
+  const handleEmotionVideoDrop = (emotion: Emotion, event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (file) {
+      const isChromeVideo = file.type === "video/webm" || 
+                            file.type === "video/mp4" || 
+                            /\.(webm|mp4)$/i.test(file.name);
+      if (!isChromeVideo) {
+        alert("再生可能な動画形式ではありません。WebM または MP4 形式の動画をアップロードしてください。");
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      
+      const oldUrl = emotionVideoUrlsRef.current[emotion];
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      emotionVideoUrlsRef.current[emotion] = url;
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          videoUrl: url,
+          videoName: file.name,
+        },
+      }));
+
+      if (emotion === "normal") {
+        setMouthlessUrl(url);
+      }
+    }
+  };
+
+  const handleEmotionTrackDrop = async (emotion: Emotion, event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const jsonFile = event.dataTransfer.files?.[0];
+    if (!jsonFile) return;
+
+    try {
+      const parsed = JSON.parse(await jsonFile.text()) as MouthTrack;
+      if (
+        !Number.isFinite(parsed.fps) ||
+        !Number.isFinite(parsed.width) ||
+        !Number.isFinite(parsed.height) ||
+        !Array.isArray(parsed.frames)
+      ) {
+        throw new Error("mouth_track.json の形式が違います");
+      }
+
+      const normalizedTrack: MouthTrack = {
+        fps: parsed.fps,
+        width: parsed.width,
+        height: parsed.height,
+        detector: parsed.detector ?? {
+          name: "imported mouth_track.json",
+          runtime: "unknown",
+          backend: "unknown",
+          processor: "import",
+          analysisFps: parsed.fps,
+          speedMode: "balanced",
+        },
+        frames: parsed.frames.map((frame, index) => {
+          if (!isImportableQuad(frame.quad)) {
+            throw new Error(`mouth_track.json の ${index} 番目のquadが不正です`);
+          }
+
+          return {
+            index: Number.isFinite(frame.index) ? frame.index : index,
+            quad: clampQuad(frame.quad, parsed.width, parsed.height),
+            valid: Boolean(frame.valid),
+            confidence: Number(frame.confidence) || 0,
+            source: frame.source || "import",
+            processor: frame.processor || "import",
+          };
+        }),
+      };
+
+      setEmotionAssets((prev) => ({
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          track: normalizedTrack,
+          trackName: jsonFile.name,
+        },
+      }));
+
+      if (emotion === "normal") {
+        setTrack(normalizedTrack);
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
+    }
+  };
+
+  const handleEmotionMouthSpriteDrop = (emotion: Emotion, name: MouthSpriteName, event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      alert("画像ファイル（PNG等）をアップロードしてください。");
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    emotionMouthSpriteUrlsRef.current.push(url);
+
+    const newSprite: GeneratedSprite = {
+      name,
+      url,
+      frameIndex: 0,
+      width: 0,
+      height: 0,
+    };
+
+    setEmotionAssets((prev) => {
+      const currentSprites = prev[emotion].mouthSprites || [];
+      const updatedSprites = [
+        ...currentSprites.filter((s) => s.name !== name),
+        newSprite,
+      ];
+      return {
+        ...prev,
+        [emotion]: {
+          ...prev[emotion],
+          mouthSprites: updatedSprites,
+        },
+      };
+    });
+
+    if (emotion === "normal") {
+      setManagedMouthSprites([
+        ...mouthSprites.filter((s) => s.name !== name),
+        newSprite,
+      ]);
+    }
+  };
+
   const handleMouthSpriteUpload = (name: MouthSpriteName, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -2098,11 +2234,24 @@ JSONフォーマット例:
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {/* Video Upload */}
                             <div className="space-y-1">
-                              <span className="text-xs font-semibold text-slate-600 block">口無し動画</span>
-                              <label className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasVideo ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}>
+                              <span className="text-xs font-semibold text-slate-600 block">口無し動画 (ドラッグ＆ドロップ可)</span>
+                              <label
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.currentTarget.classList.add("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDragLeave={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDrop={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                  handleEmotionVideoDrop(emotion.key, e);
+                                }}
+                                className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasVideo ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}
+                              >
                                 <Video className="size-3.5 flex-shrink-0" />
                                 <span className="truncate flex-1 text-left">
-                                  {asset.videoName || "動画を選択..."}
+                                  {asset.videoName || "動画を選択またはドロップ..."}
                                 </span>
                                 <input
                                   type="file"
@@ -2115,11 +2264,24 @@ JSONフォーマット例:
                             
                             {/* JSON Upload */}
                             <div className="space-y-1">
-                              <span className="text-xs font-semibold text-slate-600 block">口位置 JSON</span>
-                              <label className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasTrack ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}>
+                              <span className="text-xs font-semibold text-slate-600 block">口位置 JSON (ドラッグ＆ドロップ可)</span>
+                              <label
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.currentTarget.classList.add("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDragLeave={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                }}
+                                onDrop={(e) => {
+                                  e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                  void handleEmotionTrackDrop(emotion.key, e);
+                                }}
+                                className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasTrack ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}
+                              >
                                 <FileJson className="size-3.5 flex-shrink-0" />
                                 <span className="truncate flex-1 text-left">
-                                  {asset.trackName || "JSONを選択..."}
+                                  {asset.trackName || "JSONを選択またはドロップ..."}
                                 </span>
                                 <input
                                   type="file"
@@ -2133,7 +2295,7 @@ JSONフォーマット例:
 
                           {/* Mouth PNG Sprites for this Emotion */}
                           <div className="pt-2 border-t border-slate-200/60">
-                            <span className="text-xs font-semibold text-slate-600 block mb-2">口パーツ画像（PNG素材 - 任意）</span>
+                            <span className="text-xs font-semibold text-slate-600 block mb-2">口パーツ画像（PNG素材 - ドラッグ＆ドロップ可）</span>
                             <div className="grid grid-cols-5 gap-2">
                               {mouthSpriteNames.map((name) => {
                                 const currentSprites = asset.mouthSprites || [];
@@ -2141,6 +2303,17 @@ JSONフォーマット例:
                                 return (
                                   <label
                                     key={name}
+                                    onDragOver={(e) => {
+                                      e.preventDefault();
+                                      e.currentTarget.classList.add("border-teal-500", "bg-teal-50/20");
+                                    }}
+                                    onDragLeave={(e) => {
+                                      e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                    }}
+                                    onDrop={(e) => {
+                                      e.currentTarget.classList.remove("border-teal-500", "bg-teal-50/20");
+                                      handleEmotionMouthSpriteDrop(emotion.key, name, e);
+                                    }}
                                     className="group relative grid gap-1 rounded-md border border-dashed border-slate-300 bg-white p-2 text-center text-xs font-semibold cursor-pointer hover:border-teal-500 hover:bg-teal-50/10 transition"
                                   >
                                     <input
