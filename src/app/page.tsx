@@ -2223,7 +2223,7 @@ JSONフォーマット例:
                   />
                   <canvas
                     ref={runtimeCanvasRef}
-                    className="pointer-events-none absolute left-0 top-0 w-full h-full"
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain"
                   />
                 </div>
               </div>
