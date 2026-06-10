@@ -478,6 +478,7 @@ JSONフォーマット例:
         setTrack(asset.track);
         video.src = asset.videoUrl;
         video.load();
+        await waitForEvent(video, "canplay");
       }
 
       await playAudioAndSyncMouth(pending.audioBuffer);
@@ -493,6 +494,7 @@ JSONフォーマット例:
           setTrack(normalAsset.track);
           video.src = normalAsset.videoUrl;
           video.load();
+          await waitForEvent(video, "canplay");
         }
       } else {
         video.currentTime = 0;
