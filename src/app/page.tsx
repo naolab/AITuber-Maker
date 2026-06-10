@@ -391,15 +391,6 @@ export default function Home() {
         if (normalTrack) {
           setTrack(normalTrack);
         }
-        if (loadedAssets.normal.videoUrl && runtimeVideoRef0.current) {
-          videoAsset0Ref.current = {
-            videoUrl: loadedAssets.normal.videoUrl,
-            track: normalTrack,
-            emotion: "normal",
-          };
-          runtimeVideoRef0.current.src = loadedAssets.normal.videoUrl;
-          runtimeVideoRef0.current.load();
-        }
         if (normalMouthSprites.length > 0) {
           setManagedMouthSprites(normalMouthSprites);
         }
@@ -408,6 +399,21 @@ export default function Home() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (mode === "runtime" && emotionAssets.normal?.videoUrl && runtimeVideoRef0.current) {
+      if (!videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
+        videoAsset0Ref.current = {
+          videoUrl: emotionAssets.normal.videoUrl,
+          track: emotionAssets.normal.track,
+          emotion: "normal",
+        };
+        runtimeVideoRef0.current.src = emotionAssets.normal.videoUrl;
+        runtimeVideoRef0.current.load();
+        void runtimeVideoRef0.current.play();
+      }
+    }
+  }, [mode, emotionAssets]);
 
   const handleOpenaiKeyChange = (key: string) => {
     setOpenaiApiKey(key);
