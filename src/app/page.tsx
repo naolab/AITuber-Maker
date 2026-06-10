@@ -391,6 +391,8 @@ JSONフォーマット例:
     }
   };
 
+  const isSpeakingRef = useRef<boolean>(false);
+
   const playAudioAndSyncMouth = async (audioBuffer: ArrayBuffer) => {
     const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
     if (!AudioContextClass) throw new Error("このブラウザはWeb Audio APIに対応していません");
@@ -450,8 +452,10 @@ JSONフォーマット例:
       cancelAnimationFrame(animationFrameId);
       setActiveMouthShape("closed");
       audioCtx.close();
+      isSpeakingRef.current = false;
     };
 
+    isSpeakingRef.current = true;
     source.start(0);
     syncMouth();
   };
@@ -480,7 +484,19 @@ JSONフォーマット例:
       setPendingSpeech(null);
       void video.play();
     } else {
-      video.currentTime = 0;
+      // 発話中でなく、かつ現在の感情が通常(normal)以外の場合、通常(normal)に戻す
+      if (!isSpeakingRef.current && currentEmotion !== "normal") {
+        const normalAsset = emotionAssets["normal"];
+        if (normalAsset && normalAsset.videoUrl) {
+          setCurrentEmotion("normal");
+          setMouthlessUrl(normalAsset.videoUrl);
+          setTrack(normalAsset.track);
+          video.src = normalAsset.videoUrl;
+          video.load();
+        }
+      } else {
+        video.currentTime = 0;
+      }
       void video.play();
     }
   };
