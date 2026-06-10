@@ -1945,11 +1945,18 @@ JSONフォーマット例:
                         borderClass = "border-emerald-200 bg-emerald-50/10";
                       }
 
+                      let dotColor = "bg-slate-400";
+                      if (isComplete) {
+                        dotColor = "bg-emerald-500";
+                      } else if (isNormal) {
+                        dotColor = "bg-rose-500 animate-pulse";
+                      }
+
                       return (
                         <div key={emotion.key} className={`rounded-lg border p-4 space-y-3 transition-colors ${borderClass}`}>
                           <div className="flex items-center justify-between flex-wrap gap-2">
                             <span className="text-sm font-semibold text-slate-800 flex items-center gap-2">
-                              <span className={`inline-block w-2.5 h-2.5 rounded-full ${isNormal ? "bg-teal-600" : "bg-slate-400"}`} />
+                              <span className={`inline-block w-2.5 h-2.5 rounded-full ${dotColor}`} />
                               {emotion.label} ({emotion.key})
                             </span>
                             
