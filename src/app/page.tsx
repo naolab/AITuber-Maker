@@ -724,14 +724,13 @@ JSONフォーマット例:
     setScale(nextScale);
   };
 
-  const runtimeVideoRef = useRef<HTMLVideoElement | null>(null);
   const runtimeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [activeMouthShape, setActiveMouthShape] = useState<string>("closed");
   const runtimeLoopRef = useRef<number>(0);
   const runtimeImageCacheRef = useRef<Record<string, HTMLImageElement>>({});
 
   const updateRuntimeCanvas = () => {
-    const video = runtimeVideoRef.current;
+    const video = getActiveVideo();
     const canvas = runtimeCanvasRef.current;
     if (!video || !canvas || !track?.frames.length) return;
 
