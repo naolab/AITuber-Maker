@@ -287,7 +287,7 @@ export default function Home() {
   };
 
   // Helper to save emotion asset files to IndexedDB
-  const saveEmotionAssetToDb = async (emotion: Emotion, type: "video" | "track" | "mouthSprite", fileOrData: File | MouthTrack, spriteName?: MouthSpriteName) => {
+  const saveEmotionAssetToDb = async (emotion: Emotion, type: "video" | "track" | "mouthSprite", fileOrData: File | MouthTrack, spriteName?: MouthSpriteName, trackName?: string) => {
     try {
       const dbKey = `emotion_${emotion}_${type}${spriteName ? `_${spriteName}` : ""}`;
       if (type === "video" || type === "mouthSprite") {
@@ -295,7 +295,7 @@ export default function Home() {
         await setAsset(dbKey, { file, name: file.name });
       } else if (type === "track") {
         const trackData = fileOrData as MouthTrack;
-        await setAsset(dbKey, { track: trackData, name: "mouth_track.json" });
+        await setAsset(dbKey, { track: trackData, name: trackName || "mouth_track.json" });
       }
     } catch (err) {
       console.error(`Failed to save asset ${type} for ${emotion} to IndexedDB:`, err);
@@ -901,7 +901,7 @@ JSONフォーマット例:
       if (emotion === "normal") {
         setTrack(normalizedTrack);
       }
-      void saveEmotionAssetToDb(emotion, "track", normalizedTrack);
+      void saveEmotionAssetToDb(emotion, "track", normalizedTrack, undefined, jsonFile.name);
     } catch (error) {
       alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
     } finally {
@@ -1037,7 +1037,7 @@ JSONフォーマット例:
       if (emotion === "normal") {
         setTrack(normalizedTrack);
       }
-      void saveEmotionAssetToDb(emotion, "track", normalizedTrack);
+      void saveEmotionAssetToDb(emotion, "track", normalizedTrack, undefined, jsonFile.name);
     } catch (error) {
       alert(error instanceof Error ? error.message : "mouth_track.json の読み込みに失敗しました");
     }
