@@ -2246,10 +2246,10 @@ JSONフォーマット例:
                 onMouseDown={handleMouseDown}
                 onWheel={handleWheel}
               >
-                <div className="relative w-full h-full">
+                 <div className="relative w-full h-full">
                   <video
                     ref={runtimeVideoRef0}
-                    className="pointer-events-none absolute inset-0 w-full h-full object-contain transition-opacity duration-150"
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain"
                     style={{ opacity: activeVideoIndex === 0 ? 1 : 0 }}
                     autoPlay
                     loop={false}
@@ -2259,7 +2259,7 @@ JSONフォーマット例:
                   />
                   <video
                     ref={runtimeVideoRef1}
-                    className="pointer-events-none absolute inset-0 w-full h-full object-contain transition-opacity duration-150"
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain"
                     style={{ opacity: activeVideoIndex === 1 ? 1 : 0 }}
                     autoPlay
                     loop={false}
