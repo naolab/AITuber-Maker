@@ -2202,7 +2202,7 @@ JSONフォーマット例:
                 <div className="relative w-full h-full">
                   <video
                     ref={runtimeVideoRef0}
-                    className="pointer-events-none absolute inset-0 w-full h-full object-fill transition-opacity duration-150"
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain transition-opacity duration-150"
                     style={{ opacity: activeVideoIndex === 0 ? 1 : 0 }}
                     src={mouthlessUrl}
                     autoPlay
@@ -2213,7 +2213,7 @@ JSONフォーマット例:
                   />
                   <video
                     ref={runtimeVideoRef1}
-                    className="pointer-events-none absolute inset-0 w-full h-full object-fill transition-opacity duration-150"
+                    className="pointer-events-none absolute inset-0 w-full h-full object-contain transition-opacity duration-150"
                     style={{ opacity: activeVideoIndex === 1 ? 1 : 0 }}
                     autoPlay
                     loop={false}
