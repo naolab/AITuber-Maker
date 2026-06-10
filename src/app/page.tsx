@@ -1933,20 +1933,61 @@ JSONフォーマット例:
                   <div className="space-y-4">
                     {EMOTIONS.map((emotion) => {
                       const asset = emotionAssets[emotion.key];
+                      const isNormal = emotion.key === "normal";
+                      const hasVideo = !!asset.videoUrl;
+                      const hasTrack = !!asset.track;
+                      const isComplete = hasVideo && hasTrack;
+
+                      let borderClass = "border-slate-200 bg-slate-50/50";
+                      if (isNormal && !isComplete) {
+                        borderClass = "border-rose-300 bg-rose-50/10 shadow-sm shadow-rose-100/50";
+                      } else if (isComplete) {
+                        borderClass = "border-emerald-200 bg-emerald-50/10";
+                      }
+
                       return (
-                        <div key={emotion.key} className="rounded-lg border border-slate-200 p-4 bg-slate-50/50 space-y-3">
-                          <div className="flex items-center justify-between">
+                        <div key={emotion.key} className={`rounded-lg border p-4 space-y-3 transition-colors ${borderClass}`}>
+                          <div className="flex items-center justify-between flex-wrap gap-2">
                             <span className="text-sm font-semibold text-slate-800 flex items-center gap-2">
-                              <span className="inline-block w-2.5 h-2.5 rounded-full bg-teal-500" />
+                              <span className={`inline-block w-2.5 h-2.5 rounded-full ${isNormal ? "bg-teal-600" : "bg-slate-400"}`} />
                               {emotion.label} ({emotion.key})
                             </span>
+                            
+                            {isNormal ? (
+                              isComplete ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                                  <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                  設定済み (必須)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200 animate-pulse">
+                                  <span className="size-1.5 rounded-full bg-rose-500" />
+                                  未設定 (必須)
+                                </span>
+                              )
+                            ) : isComplete ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                                <span className="size-1.5 rounded-full bg-emerald-500" />
+                                個別設定済み
+                              </span>
+                            ) : (hasVideo || hasTrack) ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700 border border-amber-200">
+                                <span className="size-1.5 rounded-full bg-amber-500" />
+                                一部未設定 (通常版で代替)
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 border border-slate-200">
+                                <span className="size-1.5 rounded-full bg-slate-400" />
+                                未設定 (通常版で代替)
+                              </span>
+                            )}
                           </div>
                           
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {/* Video Upload */}
                             <div className="space-y-1">
                               <span className="text-xs font-semibold text-slate-600 block">口無し動画</span>
-                              <label className="flex items-center gap-2 cursor-pointer rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition">
+                              <label className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasVideo ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}>
                                 <Video className="size-3.5 flex-shrink-0" />
                                 <span className="truncate flex-1 text-left">
                                   {asset.videoName || "動画を選択..."}
@@ -1963,7 +2004,7 @@ JSONフォーマット例:
                             {/* JSON Upload */}
                             <div className="space-y-1">
                               <span className="text-xs font-semibold text-slate-600 block">口位置 JSON</span>
-                              <label className="flex items-center gap-2 cursor-pointer rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition">
+                              <label className={`flex items-center gap-2 cursor-pointer rounded-md border bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 truncate transition ${isNormal && !hasTrack ? "border-rose-300 ring-1 ring-rose-200" : "border-slate-200"}`}>
                                 <FileJson className="size-3.5 flex-shrink-0" />
                                 <span className="truncate flex-1 text-left">
                                   {asset.trackName || "JSONを選択..."}
