@@ -124,6 +124,7 @@ export default function Home() {
   const [videoUrl, setVideoUrl] = useState("");
   const [videoMeta, setVideoMeta] = useState({ width: 0, height: 0, duration: 0 });
   const [analysisFps, setAnalysisFps] = useState(24);
+  const [smoothCutoff, setSmoothCutoff] = useState(3.0);
   const [speedMode, setSpeedMode] = useState<SpeedMode>("balanced");
   const [isDragging, setIsDragging] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -1138,7 +1139,7 @@ JSONフォーマット例:
         };
         return framesByIndex.get(index) ?? fallback;
       });
-      const processed = postProcessTrackFrames(rawFrames, effectiveFps, 0);
+      const processed = postProcessTrackFrames(rawFrames, effectiveFps, smoothCutoff);
       const resampled = resampleTrackFrames(processed.frames, effectiveFps, targetFps, videoMeta.duration);
       const frames = resampled.frames.map((frame, index) => ({
         ...frame,
@@ -1626,6 +1627,23 @@ JSONフォーマット例:
                     </option>
                   ))}
                 </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium flex items-center justify-between">
+                  <span>ブレ防止強度 (滑らかさ)</span>
+                  <span className="text-xs font-semibold text-teal-600">{smoothCutoff.toFixed(1)} Hz</span>
+                </span>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min="0"
+                    max="8"
+                    step="0.5"
+                    className="flex-1 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-teal-600"
+                    value={smoothCutoff}
+                    onChange={(event) => setSmoothCutoff(Number(event.target.value))}
+                  />
+                </div>
               </label>
               <div className="h-2 rounded-full bg-slate-100">
                 <div className="h-full rounded-full bg-teal-600 transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
