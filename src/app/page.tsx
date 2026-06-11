@@ -207,6 +207,7 @@ export default function Home() {
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
+  const [lastUserMessage, setLastUserMessage] = useState("");
   const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
 
   const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
@@ -457,6 +458,7 @@ export default function Home() {
 
   const sendChatMessage = async () => {
     if (!chatInput.trim() || !openaiApiKey || isChatSending) return;
+    setLastUserMessage(chatInput);
     setIsChatSending(true);
 
     try {
@@ -2276,9 +2278,19 @@ JSONフォーマット例:
 
             {/* Chat Input Floating Form */}
             <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 flex flex-col items-center gap-4">
+              {/* Latest User Message Bubble */}
+              {lastUserMessage && (
+                <div className="self-end rounded-2xl border border-slate-700 bg-slate-800/90 px-5 py-3 shadow-md backdrop-blur-sm max-w-[85%] text-sm text-white transition-all relative">
+                  <div className="absolute -top-2.5 right-4 px-2 py-0.5 rounded bg-slate-600 text-[10px] font-bold text-white shadow-sm">
+                    あなた
+                  </div>
+                  <div className="mt-1">{lastUserMessage}</div>
+                </div>
+              )}
+
               {/* Latest Reply Bubble */}
               {lastReply && (
-                <div className="rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-full text-sm text-slate-800 transition-all relative">
+                <div className="self-start rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-[85%] text-sm text-slate-800 transition-all relative">
                   <div className="absolute -top-2.5 left-4 px-2 py-0.5 rounded bg-teal-600 text-[10px] font-bold text-white shadow-sm">
                     {EMOTIONS.find(e => e.key === currentEmotion)?.label || "通常"}
                   </div>
