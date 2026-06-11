@@ -523,8 +523,6 @@ JSONフォーマット例:
         cleanText = replyJson;
       }
 
-      setLastReply(cleanText);
-
       // 2. Aivis Speech synthesis
       const synthRes = await fetch("/api/aivis/synthesis", {
         method: "POST",
@@ -695,6 +693,7 @@ JSONフォーマット例:
         await waitForEvent(nextVideo, "canplay");
       }
 
+      setLastReply(pending.text);
       await playAudioAndSyncMouth(pending.audioBuffer);
       setPendingSpeech(null);
       
