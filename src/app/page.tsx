@@ -80,6 +80,10 @@ type WindowWithWebkitAudio = Window & {
   webkitAudioContext?: typeof AudioContext;
 };
 
+type CanvasCaptureTrackWithRequestFrame = MediaStreamTrack & {
+  requestFrame?: () => void;
+};
+
 const revokeObjectUrl = (url: string) => {
   if (url) URL.revokeObjectURL(url);
 };
@@ -93,6 +97,33 @@ const isImportableQuad = (value: unknown): value is Quad =>
       point.length === 2 &&
       point.every((coordinate) => Number.isFinite(coordinate)),
   );
+
+const hexToRgb = (hex: string) => {
+  const normalized = hex.trim().replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return { r: 0, g: 255, b: 0 };
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16),
+  };
+};
+
+const getSupportedTransparentWebmMimeType = () => {
+  const candidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? "";
+};
+
+const transparentPreviewBackground = {
+  backgroundColor: "#f8fafc",
+  backgroundImage:
+    "linear-gradient(45deg, #cbd5e1 25%, transparent 25%), linear-gradient(-45deg, #cbd5e1 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #cbd5e1 75%), linear-gradient(-45deg, transparent 75%, #cbd5e1 75%)",
+  backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0",
+  backgroundSize: "16px 16px",
+};
 
 type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
 
@@ -189,6 +220,10 @@ export default function Home() {
   const [mouthlessUrl, setMouthlessUrl] = useState("");
   const [mouthlessStatus, setMouthlessStatus] = useState("未生成");
   const [isGeneratingMouthless, setIsGeneratingMouthless] = useState(false);
+  const [isMouthlessTransparent, setIsMouthlessTransparent] = useState(false);
+  const [mouthlessKeyColor, setMouthlessKeyColor] = useState("#00ff00");
+  const [mouthlessKeyTolerance, setMouthlessKeyTolerance] = useState(42);
+  const [mouthlessKeyFeather, setMouthlessKeyFeather] = useState(18);
   const [voicevoxUrl, setVoicevoxUrl] = useState("http://127.0.0.1:50021");
   const [voicevoxStatus, setVoicevoxStatus] = useState("未接続");
 
@@ -1749,6 +1784,82 @@ JSONフォーマット例:
     drawWarpedPatch(outputContext, patchCanvas, eraseQuad, patchWidth, patchHeight);
   };
 
+  const applyChromaKeyAlpha = (
+    context: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    keyColor: string,
+    tolerance: number,
+    feather: number,
+  ) => {
+    const { r, g, b } = hexToRgb(keyColor);
+    const imageData = context.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    const hardThreshold = Math.max(0, Number(tolerance) || 0);
+    const softRange = Math.max(0, Number(feather) || 0);
+    const transparentThreshold = hardThreshold;
+    const opaqueThreshold = hardThreshold + softRange;
+
+    for (let index = 0; index < data.length; index += 4) {
+      const dr = data[index] - r;
+      const dg = data[index + 1] - g;
+      const db = data[index + 2] - b;
+      const distance = Math.hypot(dr, dg, db);
+      let alphaScale = 1;
+
+      if (distance <= transparentThreshold) {
+        alphaScale = 0;
+      } else if (softRange > 0 && distance < opaqueThreshold) {
+        alphaScale = (distance - transparentThreshold) / softRange;
+      }
+
+      data[index + 3] = Math.round(data[index + 3] * alphaScale);
+    }
+
+    context.putImageData(imageData, 0, 0);
+  };
+
+  const recordCanvasFramesAsTransparentWebm = async (
+    canvas: HTMLCanvasElement,
+    fps: number,
+    drawFrame: (index: number) => Promise<void>,
+    totalFrames: number,
+  ) => {
+    if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
+      throw new Error("このブラウザは透過WebM録画に対応していません");
+    }
+
+    const mimeType = getSupportedTransparentWebmMimeType();
+    if (!mimeType) {
+      throw new Error("このブラウザはWebM録画に対応していません");
+    }
+
+    const stream = canvas.captureStream(0);
+    const [track] = stream.getVideoTracks() as CanvasCaptureTrackWithRequestFrame[];
+    const chunks: BlobPart[] = [];
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+    const stopped = new Promise<Blob>((resolve, reject) => {
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onerror = () => reject(new Error("透過WebM録画に失敗しました"));
+      recorder.onstop = () => {
+        stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+        resolve(new Blob(chunks, { type: mimeType }));
+      };
+    });
+
+    recorder.start();
+    const frameDuration = 1000 / fps;
+    for (let index = 0; index < totalFrames; index += 1) {
+      await drawFrame(index);
+      track?.requestFrame?.();
+      await sleep(frameDuration);
+    }
+    recorder.stop();
+    return stopped;
+  };
+
   const generateMouthlessVideo = async (sourceTrack = trackRef.current) => {
     const video = videoRef.current;
     const currentTrack = sourceTrack;
@@ -1760,7 +1871,7 @@ JSONフォーマット例:
 
     const restore = { time: video.currentTime, wasPaused: video.paused, loop: video.loop };
     const outputCanvas = document.createElement("canvas");
-    const outputContext = outputCanvas.getContext("2d", { alpha: false });
+    const outputContext = outputCanvas.getContext("2d", { alpha: isMouthlessTransparent });
     const patchCanvas = document.createElement("canvas");
     const patchContext = patchCanvas.getContext("2d");
     if (!outputContext || !patchContext) {
@@ -1787,6 +1898,7 @@ JSONフォーマット例:
     const fps = Math.max(1, Math.min(60, Math.round(currentTrack.fps || 24)));
     const totalFrames = Math.max(1, Math.min(currentTrack.frames.length, Math.round((video.duration || currentTrack.frames.length / fps) * fps)));
     const encodedFrames: Uint8Array[] = [];
+    const shouldExportTransparent = isMouthlessTransparent;
 
     outputCanvas.width = currentTrack.width;
     outputCanvas.height = currentTrack.height;
@@ -1858,11 +1970,12 @@ JSONフォーマット例:
         refStats,
       };
 
-      for (let index = 0; index < totalFrames; index += 1) {
+      const drawEncodedFrame = async (index: number) => {
         if (index === 0 || index % 10 === 0 || index === totalFrames - 1) {
-          setMouthlessStatus(`動画生成 ${index + 1}/${totalFrames}`);
+          setMouthlessStatus(`${shouldExportTransparent ? "透過動画生成" : "動画生成"} ${index + 1}/${totalFrames}`);
         }
         await seekVideo(index / fps);
+        outputContext.clearRect(0, 0, currentTrack.width, currentTrack.height);
         createMouthlessFrame(
           outputContext,
           patchContext,
@@ -1875,8 +1988,27 @@ JSONフォーマット例:
           patchWidth,
           patchHeight,
         );
-        encodedFrames.push(await canvasToVp8Frame(outputCanvas));
-        if (index % 4 === 0) await sleep(0);
+        if (shouldExportTransparent) {
+          applyChromaKeyAlpha(
+            outputContext,
+            currentTrack.width,
+            currentTrack.height,
+            mouthlessKeyColor,
+            mouthlessKeyTolerance,
+            mouthlessKeyFeather,
+          );
+        } else {
+          encodedFrames.push(await canvasToVp8Frame(outputCanvas));
+        }
+        if (index % 4 === 0 && !shouldExportTransparent) await sleep(0);
+      };
+
+      if (shouldExportTransparent) {
+        setMouthlessStatus("透過WebM録画中");
+        const transparentWebm = await recordCanvasFramesAsTransparentWebm(outputCanvas, fps, drawEncodedFrame, totalFrames);
+        setManagedMouthlessUrl(URL.createObjectURL(transparentWebm));
+        setMouthlessStatus("透過WebM生成完了");
+        return true;
       }
 
       setMouthlessStatus("WebM作成中");
@@ -2006,7 +2138,8 @@ JSONフォーマット例:
                       <div className="min-w-0">
                         <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">口無し動画</p>
                       <video
-                        className="aspect-video w-full bg-black object-contain"
+                        className="aspect-video w-full object-contain"
+                        style={isMouthlessTransparent ? transparentPreviewBackground : { backgroundColor: "#000" }}
                         src={mouthlessUrl}
                         controls
                         playsInline
@@ -2188,6 +2321,65 @@ JSONフォーマット例:
 
               <div className="h-px bg-slate-200" />
               <PanelTitle icon={<Video />} title="口無し動画" badge={mouthlessStatus} />
+              <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                <span className="font-medium text-slate-700">単色背景を透過</span>
+                <input
+                  type="checkbox"
+                  className="size-4 accent-teal-600"
+                  checked={isMouthlessTransparent}
+                  onChange={(event) => setIsMouthlessTransparent(event.target.checked)}
+                />
+              </label>
+              {isMouthlessTransparent && (
+                <div className="grid gap-3 rounded-md border border-teal-100 bg-teal-50/50 p-3">
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium">透過する背景色</span>
+                    <div className="flex gap-2">
+                      <input
+                        className="h-10 w-12 rounded-md border border-slate-200 bg-white p-1"
+                        type="color"
+                        value={mouthlessKeyColor}
+                        onChange={(event) => setMouthlessKeyColor(event.target.value)}
+                      />
+                      <input
+                        className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-sm"
+                        value={mouthlessKeyColor}
+                        onChange={(event) => setMouthlessKeyColor(event.target.value)}
+                      />
+                    </div>
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="flex items-center justify-between font-medium">
+                      <span>許容値</span>
+                      <span className="font-mono text-xs text-teal-700">{mouthlessKeyTolerance}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="160"
+                      step="1"
+                      className="h-1 cursor-pointer appearance-none rounded-lg bg-slate-200 accent-teal-600"
+                      value={mouthlessKeyTolerance}
+                      onChange={(event) => setMouthlessKeyTolerance(Number(event.target.value))}
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="flex items-center justify-between font-medium">
+                      <span>境界ぼかし</span>
+                      <span className="font-mono text-xs text-teal-700">{mouthlessKeyFeather}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      className="h-1 cursor-pointer appearance-none rounded-lg bg-slate-200 accent-teal-600"
+                      value={mouthlessKeyFeather}
+                      onChange={(event) => setMouthlessKeyFeather(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+              )}
               <div className="flex gap-2">
                 <button
                   className="flex-1 flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
@@ -2204,9 +2396,9 @@ JSONフォーマット例:
                 </label>
               </div>
               {mouthlessUrl && (
-                <a className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white" href={mouthlessUrl} download="mouthless.webm">
+                <a className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white" href={mouthlessUrl} download={isMouthlessTransparent ? "mouthless-transparent.webm" : "mouthless.webm"}>
                   <Download className="size-4" />
-                  mouthless.webm 保存
+                  {isMouthlessTransparent ? "mouthless-transparent.webm 保存" : "mouthless.webm 保存"}
                 </a>
               )}
             </aside>
