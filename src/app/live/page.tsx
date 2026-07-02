@@ -1,0 +1,746 @@
+"use client";
+
+import { PointerEvent, WheelEvent, useCallback, useEffect, useRef, useState } from "react";
+
+import type { GeneratedSprite, MouthTrack, Quad } from "@/lib/materials";
+import { drawWarpedPatch } from "@/lib/materials";
+
+type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
+
+type EmotionAsset = {
+  videoUrl: string;
+  track: MouthTrack | null;
+  mouthSprites: GeneratedSprite[];
+};
+
+type StoredFile = {
+  file: File;
+  name: string;
+};
+
+type StoredTrack = {
+  track: MouthTrack;
+  name: string;
+};
+
+type YouTubeChatMessage = {
+  id: string;
+  authorName: string;
+  authorImageUrl: string;
+  message: string;
+  publishedAt: string;
+  type: string;
+  isOwner: boolean;
+  isModerator: boolean;
+  isSponsor: boolean;
+};
+
+type YouTubeLiveChatResponse = {
+  liveChatId?: string;
+  nextPageToken?: string;
+  pollingIntervalMillis?: number;
+  messages?: YouTubeChatMessage[];
+  error?: string;
+};
+
+type LiveSpeechMessage = {
+  type: "speech";
+  emotion: Emotion;
+  text: string;
+  audioBuffer: ArrayBuffer;
+};
+
+type ServerLiveAsset = {
+  videoUrl?: string;
+  trackUrl?: string;
+  mouthSprites?: Array<{
+    name: string;
+    url: string;
+  }>;
+};
+
+type ServerLiveAssetsResponse = {
+  assets?: Partial<Record<Emotion, ServerLiveAsset>>;
+};
+
+type WindowWithWebkitAudio = Window & {
+  webkitAudioContext?: typeof AudioContext;
+};
+
+type OverlayLayout = {
+  x: number;
+  y: number;
+  scale: number;
+};
+
+type DragTarget = "character" | "chat";
+
+type DragState = {
+  target: DragTarget;
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startLayout: OverlayLayout;
+};
+
+const DB_NAME = "AITuberMakerAssets";
+const DB_VERSION = 1;
+const STORE_NAME = "assets";
+const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
+const EMOTIONS: Emotion[] = ["normal", "happy", "angry", "surprised", "sad"];
+const MOUTH_SPRITE_NAMES = ["closed", "half", "open", "e", "u"];
+const CHARACTER_LAYOUT_KEY = "live_character_layout";
+const CHAT_LAYOUT_KEY = "live_chat_layout";
+const DEFAULT_CHARACTER_LAYOUT: OverlayLayout = { x: 0, y: 0, scale: 1 };
+const DEFAULT_CHAT_LAYOUT: OverlayLayout = { x: 0, y: 0, scale: 1 };
+
+const isEmotion = (value: unknown): value is Emotion =>
+  value === "normal" || value === "happy" || value === "angry" || value === "surprised" || value === "sad";
+
+const isImportableQuad = (value: unknown): value is Quad =>
+  Array.isArray(value) &&
+  value.length === 4 &&
+  value.every(
+    (point) =>
+      Array.isArray(point) &&
+      point.length === 2 &&
+      point.every((coordinate) => Number.isFinite(coordinate)),
+  );
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const readStoredLayout = (key: string, fallback: OverlayLayout) => {
+  try {
+    const rawValue = localStorage.getItem(key);
+    if (!rawValue) return fallback;
+    const value = JSON.parse(rawValue) as Partial<OverlayLayout>;
+    const x = Number(value.x);
+    const y = Number(value.y);
+    const scale = Number(value.scale);
+    return {
+      x: Number.isFinite(x) ? x : fallback.x,
+      y: Number.isFinite(y) ? y : fallback.y,
+      scale: Number.isFinite(scale) ? clamp(scale, 0.2, 5) : fallback.scale,
+    };
+  } catch {
+    return fallback;
+  }
+};
+
+const writeStoredLayout = (key: string, value: OverlayLayout) => {
+  localStorage.setItem(key, JSON.stringify(value));
+};
+
+function initDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !window.indexedDB) {
+      reject(new Error("IndexedDB is not supported"));
+      return;
+    }
+    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+}
+
+function getAsset<T>(key: string): Promise<T | null> {
+  return initDb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readonly");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.get(key);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve((request.result as T) || null);
+      }),
+  );
+}
+
+const sanitizeTrack = (track: MouthTrack): MouthTrack => ({
+  ...track,
+  frames: track.frames.map((frame) => ({
+    ...frame,
+    valid: Boolean(frame.valid && isImportableQuad(frame.quad)),
+  })),
+});
+
+const loadServerLiveAssets = async () => {
+  const response = await fetch("/api/live-assets", { cache: "no-store" });
+  if (!response.ok) throw new Error("OBS用素材の取得に失敗しました");
+
+  const data = (await response.json()) as ServerLiveAssetsResponse;
+  const nextAssets = {} as Record<Emotion, EmotionAsset>;
+
+  for (const emotion of EMOTIONS) {
+    const asset = data.assets?.[emotion];
+    let track: MouthTrack | null = null;
+    if (asset?.trackUrl) {
+      const trackResponse = await fetch(asset.trackUrl, { cache: "no-store" });
+      if (trackResponse.ok) {
+        track = sanitizeTrack((await trackResponse.json()) as MouthTrack);
+      }
+    }
+
+    nextAssets[emotion] = {
+      videoUrl: asset?.videoUrl || "",
+      track,
+      mouthSprites:
+        asset?.mouthSprites?.map((sprite) => ({
+          name: sprite.name,
+          url: sprite.url,
+        } as GeneratedSprite)) || [],
+    };
+  }
+
+  return nextAssets;
+};
+
+export default function LiveOutputPage() {
+  const [assets, setAssets] = useState<Record<Emotion, EmotionAsset>>({
+    normal: { videoUrl: "", track: null, mouthSprites: [] },
+    happy: { videoUrl: "", track: null, mouthSprites: [] },
+    angry: { videoUrl: "", track: null, mouthSprites: [] },
+    surprised: { videoUrl: "", track: null, mouthSprites: [] },
+    sad: { videoUrl: "", track: null, mouthSprites: [] },
+  });
+  const [status, setStatus] = useState("配信素材を読み込み中");
+  const [activeEmotion, setActiveEmotion] = useState<Emotion>("normal");
+  const [mouthShape, setMouthShape] = useState("closed");
+  const [lastReply, setLastReply] = useState("");
+  const [bgType, setBgType] = useState<"color" | "image">("color");
+  const [bgColor, setBgColor] = useState("#f7f8fb");
+  const [bgImageUrl] = useState("");
+  const [youtubeApiKey, setYoutubeApiKey] = useState("");
+  const [youtubeVideoId, setYoutubeVideoId] = useState("");
+  const [youtubeLiveChatId, setYoutubeLiveChatId] = useState("");
+  const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
+  const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
+  const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
+  const [characterLayout, setCharacterLayout] = useState<OverlayLayout>(DEFAULT_CHARACTER_LAYOUT);
+  const [chatLayout, setChatLayout] = useState<OverlayLayout>(DEFAULT_CHAT_LAYOUT);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const animationRef = useRef(0);
+  const characterLayoutRef = useRef(DEFAULT_CHARACTER_LAYOUT);
+  const chatLayoutRef = useRef(DEFAULT_CHAT_LAYOUT);
+  const dragStateRef = useRef<DragState | null>(null);
+  const assetsRef = useRef(assets);
+  const activeEmotionRef = useRef<Emotion>("normal");
+  const mouthShapeRef = useRef("closed");
+  const imageCacheRef = useRef<Record<string, HTMLImageElement>>({});
+  const objectUrlsRef = useRef<string[]>([]);
+  const youtubeNextPageTokenRef = useRef("");
+  const youtubeMessageIdsRef = useRef<Set<string>>(new Set());
+  const youtubeLiveChatIdRef = useRef("");
+
+  useEffect(() => {
+    assetsRef.current = assets;
+  }, [assets]);
+
+  useEffect(() => {
+    activeEmotionRef.current = activeEmotion;
+  }, [activeEmotion]);
+
+  useEffect(() => {
+    mouthShapeRef.current = mouthShape;
+  }, [mouthShape]);
+
+  useEffect(() => {
+    youtubeLiveChatIdRef.current = youtubeLiveChatId;
+  }, [youtubeLiveChatId]);
+
+  useEffect(() => {
+    characterLayoutRef.current = characterLayout;
+  }, [characterLayout]);
+
+  useEffect(() => {
+    chatLayoutRef.current = chatLayout;
+  }, [chatLayout]);
+
+  const loadSettings = useCallback(() => {
+    const nextBgType = localStorage.getItem("runtime_bg_type") === "image" ? "image" : "color";
+    setBgType(nextBgType);
+    setBgColor(localStorage.getItem("runtime_bg_color") || "#f7f8fb");
+    setYoutubeApiKey(localStorage.getItem("youtube_api_key") || "");
+    setYoutubeVideoId(localStorage.getItem("youtube_video_id") || "");
+    setYoutubeLiveChatId(localStorage.getItem("youtube_live_chat_id") || "");
+    setIsYoutubeChatEnabled(localStorage.getItem("youtube_chat_enabled") === "true");
+    setCharacterLayout(readStoredLayout(CHARACTER_LAYOUT_KEY, DEFAULT_CHARACTER_LAYOUT));
+    setChatLayout(readStoredLayout(CHAT_LAYOUT_KEY, DEFAULT_CHAT_LAYOUT));
+  }, []);
+
+  const updateLayout = useCallback((target: DragTarget, updater: (current: OverlayLayout) => OverlayLayout) => {
+    if (target === "character") {
+      setCharacterLayout((current) => {
+        const next = updater(current);
+        characterLayoutRef.current = next;
+        writeStoredLayout(CHARACTER_LAYOUT_KEY, next);
+        return next;
+      });
+      return;
+    }
+
+    setChatLayout((current) => {
+      const next = updater(current);
+      chatLayoutRef.current = next;
+      writeStoredLayout(CHAT_LAYOUT_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const startDrag = useCallback((target: DragTarget, event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStateRef.current = {
+      target,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startLayout: target === "character" ? characterLayoutRef.current : chatLayoutRef.current,
+    };
+  }, []);
+
+  const handleDragMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    const nextLayout = {
+      ...dragState.startLayout,
+      x: dragState.startLayout.x + event.clientX - dragState.startClientX,
+      y: dragState.startLayout.y + event.clientY - dragState.startClientY,
+    };
+    updateLayout(dragState.target, () => nextLayout);
+  }, [updateLayout]);
+
+  const stopDrag = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    dragStateRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
+  const handleLayoutWheel = useCallback((target: DragTarget, event: WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    updateLayout(target, (current) => ({
+      ...current,
+      scale: clamp(current.scale - event.deltaY * 0.0015, 0.2, 5),
+    }));
+  }, [updateLayout]);
+
+  const loadAssets = useCallback(async () => {
+    const nextAssets = {} as Record<Emotion, EmotionAsset>;
+    const nextUrls: string[] = [];
+
+    for (const emotion of EMOTIONS) {
+      const videoData = await getAsset<StoredFile>(`emotion_${emotion}_video`);
+      const trackData = await getAsset<StoredTrack>(`emotion_${emotion}_track`);
+      const sprites: GeneratedSprite[] = [];
+
+      for (const name of MOUTH_SPRITE_NAMES) {
+        const spriteData = await getAsset<StoredFile>(`emotion_${emotion}_mouthSprite_${name}`);
+        if (spriteData?.file) {
+          const url = URL.createObjectURL(spriteData.file);
+          nextUrls.push(url);
+          sprites.push({ name, url } as GeneratedSprite);
+        }
+      }
+
+      let videoUrl = "";
+      if (videoData?.file) {
+        videoUrl = URL.createObjectURL(videoData.file);
+        nextUrls.push(videoUrl);
+      }
+
+      nextAssets[emotion] = {
+        videoUrl,
+        track: trackData?.track ? sanitizeTrack(trackData.track) : null,
+        mouthSprites: sprites,
+      };
+    }
+
+    let loadedAssets = nextAssets;
+    let loadedUrls = nextUrls;
+    let normalAsset = loadedAssets.normal;
+
+    if (!normalAsset.videoUrl || !normalAsset.track) {
+      loadedUrls.forEach((url) => URL.revokeObjectURL(url));
+      loadedUrls = [];
+      loadedAssets = await loadServerLiveAssets();
+      normalAsset = loadedAssets.normal;
+    }
+
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    objectUrlsRef.current = loadedUrls;
+    setAssets(loadedAssets);
+
+    if (!normalAsset.videoUrl || !normalAsset.track) {
+      setStatus("通常素材の動画と mouth_track.json が必要です");
+      return;
+    }
+
+    setStatus("配信待機中");
+    setActiveEmotion("normal");
+    const video = videoRef.current;
+    if (video) {
+      video.src = normalAsset.videoUrl;
+      video.load();
+      void video.play();
+    }
+  }, []);
+
+  useEffect(() => {
+    const loadTimer = window.setTimeout(() => {
+      loadSettings();
+      void loadAssets().catch((error) => {
+        console.error(error);
+        setStatus(error instanceof Error ? error.message : "配信素材の読み込みに失敗しました");
+      });
+    }, 0);
+
+    const handleStorage = () => loadSettings();
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.clearTimeout(loadTimer);
+      window.removeEventListener("storage", handleStorage);
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [loadAssets, loadSettings]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !assets.normal.videoUrl) return;
+    video.src = assets.normal.videoUrl;
+    video.load();
+    void video.play();
+  }, [assets.normal.videoUrl]);
+
+  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer) => {
+    const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
+    if (!AudioContextClass) {
+      setStatus("このブラウザはWeb Audio APIに対応していません");
+      return;
+    }
+
+    const audioCtx = new AudioContextClass();
+    if (audioCtx.state === "suspended") {
+      await audioCtx.resume();
+    }
+
+    const buffer = await audioCtx.decodeAudioData(audioBuffer.slice(0));
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.35;
+    source.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    const data = new Uint8Array(analyser.fftSize);
+    let frame = 0;
+    let lastUpdateTime = 0;
+    let smoothedLevel = 0;
+
+    const sync = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const value of data) {
+        const centered = (value - 128) / 128;
+        sum += centered * centered;
+      }
+      const rawLevel = Math.min(Math.sqrt(sum / data.length) * 10, 1);
+      smoothedLevel = rawLevel > smoothedLevel ? rawLevel : smoothedLevel * 0.6 + rawLevel * 0.4;
+
+      const now = performance.now();
+      if (now - lastUpdateTime >= 50) {
+        lastUpdateTime = now;
+        if (smoothedLevel > 0.45) setMouthShape("open");
+        else if (smoothedLevel > 0.15) setMouthShape("half");
+        else setMouthShape("closed");
+      }
+
+      frame = requestAnimationFrame(sync);
+    };
+
+    source.onended = () => {
+      cancelAnimationFrame(frame);
+      setMouthShape("closed");
+      setActiveEmotion("normal");
+      setStatus("配信待機中");
+      const normalAsset = assetsRef.current.normal;
+      const video = videoRef.current;
+      if (video && normalAsset.videoUrl && video.src !== normalAsset.videoUrl) {
+        video.src = normalAsset.videoUrl;
+        video.load();
+        void video.play();
+      }
+      void audioCtx.close();
+    };
+
+    setStatus("発話中");
+    source.start(0);
+    sync();
+  }, []);
+
+  useEffect(() => {
+    if (!("BroadcastChannel" in window)) {
+      globalThis.setTimeout(() => setStatus("BroadcastChannelに対応していません"), 0);
+      return;
+    }
+
+    const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
+    channel.onmessage = (event: MessageEvent<LiveSpeechMessage>) => {
+      const message = event.data;
+      if (message?.type !== "speech" || !isEmotion(message.emotion)) return;
+
+      const nextEmotion = assetsRef.current[message.emotion]?.videoUrl ? message.emotion : "normal";
+      const nextAsset = assetsRef.current[nextEmotion];
+      const video = videoRef.current;
+      setActiveEmotion(nextEmotion);
+      setLastReply(message.text);
+
+      if (video && nextAsset.videoUrl && video.src !== nextAsset.videoUrl) {
+        video.src = nextAsset.videoUrl;
+        video.load();
+        void video.play();
+      }
+
+      void playAudioAndSyncMouth(message.audioBuffer).catch((error) => {
+        console.error(error);
+        setStatus(error instanceof Error ? error.message : "音声再生に失敗しました");
+      });
+    };
+
+    return () => channel.close();
+  }, [playAudioAndSyncMouth]);
+
+  useEffect(() => {
+    const tick = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const asset = assetsRef.current[activeEmotionRef.current];
+
+      if (!video || !canvas || !asset?.track?.frames.length || video.videoWidth === 0) {
+        animationRef.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        animationRef.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const frameIndex = Math.min(
+        asset.track.frames.length - 1,
+        Math.max(0, Math.floor(video.currentTime * asset.track.fps)),
+      );
+      const frame = asset.track.frames[frameIndex];
+      if (frame?.valid && frame.quad) {
+        const normalSprites = assetsRef.current.normal.mouthSprites;
+        const activeSprites = asset.mouthSprites.length > 0 ? asset.mouthSprites : normalSprites;
+        const sprite =
+          activeSprites.find((item) => item.name.toLowerCase() === mouthShapeRef.current) ||
+          activeSprites.find((item) => item.name.toLowerCase() === "closed");
+
+        if (sprite) {
+          let img = imageCacheRef.current[sprite.url];
+          if (!img) {
+            img = new window.Image();
+            img.src = sprite.url;
+            imageCacheRef.current[sprite.url] = img;
+          }
+          if (img.complete && img.naturalWidth > 0) {
+            drawWarpedPatch(ctx, img, frame.quad, img.naturalWidth || img.width, img.naturalHeight || img.height);
+          }
+        }
+      }
+
+      animationRef.current = requestAnimationFrame(tick);
+    };
+
+    animationRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animationRef.current);
+  }, []);
+
+  const fetchYoutubeLiveChat = useCallback(async () => {
+    if (!youtubeApiKey || (!youtubeVideoId && !youtubeLiveChatIdRef.current)) {
+      setYoutubeChatStatus("APIキーと動画IDが必要");
+      return 5000;
+    }
+
+    const params = new URLSearchParams({ apiKey: youtubeApiKey });
+    if (youtubeVideoId) params.set("videoId", youtubeVideoId);
+    if (youtubeLiveChatIdRef.current) params.set("liveChatId", youtubeLiveChatIdRef.current);
+    if (youtubeNextPageTokenRef.current) params.set("pageToken", youtubeNextPageTokenRef.current);
+
+    const response = await fetch(`/api/youtube/live-chat?${params.toString()}`, { cache: "no-store" });
+    const data = (await response.json()) as YouTubeLiveChatResponse;
+    if (!response.ok) throw new Error(data.error || "コメント取得に失敗しました");
+
+    if (data.liveChatId && data.liveChatId !== youtubeLiveChatIdRef.current) {
+      setYoutubeLiveChatId(data.liveChatId);
+      youtubeLiveChatIdRef.current = data.liveChatId;
+      localStorage.setItem("youtube_live_chat_id", data.liveChatId);
+    }
+    youtubeNextPageTokenRef.current = data.nextPageToken || "";
+    setYoutubeChatStatus("接続中");
+
+    if (data.messages?.length) {
+      setYoutubeMessages((prev) => {
+        const next = [...prev];
+        for (const message of data.messages || []) {
+          if (!message.message || youtubeMessageIdsRef.current.has(message.id)) continue;
+          youtubeMessageIdsRef.current.add(message.id);
+          next.push(message);
+        }
+        return next.slice(-12);
+      });
+    }
+
+    return Math.max(data.pollingIntervalMillis || 5000, 2000);
+  }, [youtubeApiKey, youtubeVideoId]);
+
+  useEffect(() => {
+    if (!isYoutubeChatEnabled) {
+      return;
+    }
+
+    let disposed = false;
+    let timer = 0;
+
+    const poll = async () => {
+      try {
+        const interval = await fetchYoutubeLiveChat();
+        if (!disposed) timer = window.setTimeout(poll, interval);
+      } catch (error) {
+        setYoutubeChatStatus(error instanceof Error ? error.message : "コメント取得に失敗");
+        if (!disposed) timer = window.setTimeout(poll, 8000);
+      }
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [fetchYoutubeLiveChat, isYoutubeChatEnabled]);
+
+  const activeAsset = assets[activeEmotion];
+
+  return (
+    <main
+      className="relative h-screen w-screen overflow-hidden text-white"
+      style={
+        bgType === "image" && bgImageUrl
+          ? { backgroundImage: `url(${bgImageUrl})`, backgroundSize: "cover", backgroundPosition: "center" }
+          : { backgroundColor: bgColor }
+      }
+    >
+      {activeAsset.videoUrl ? (
+        <div
+          className="absolute left-1/2 top-1/2 z-10 select-none overflow-hidden bg-black"
+          style={{
+            height: "min(82vh, 56.25vw)",
+            width: "min(92vw, 145.78vh)",
+            transform: `translate(-50%, -50%) translate(${characterLayout.x}px, ${characterLayout.y}px) scale(${characterLayout.scale})`,
+            transformOrigin: "center center",
+            cursor: "grab",
+            touchAction: "none",
+          }}
+          onPointerDown={(event) => startDrag("character", event)}
+          onPointerMove={handleDragMove}
+          onPointerUp={stopDrag}
+          onPointerCancel={stopDrag}
+          onWheel={(event) => handleLayoutWheel("character", event)}
+        >
+          <div className="relative h-full w-full">
+            <video
+              ref={videoRef}
+              className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+              autoPlay
+              loop
+              muted
+              playsInline
+            />
+            <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
+          </div>
+        </div>
+      ) : (
+        <div className="absolute inset-0 grid place-items-center bg-slate-950 text-sm font-semibold text-white">
+          {status}
+        </div>
+      )}
+
+      {isYoutubeChatEnabled && (
+        <div
+          className="absolute right-6 top-6 z-20 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] select-none flex-col justify-end gap-2 overflow-hidden"
+          style={{
+            transform: `translate(${chatLayout.x}px, ${chatLayout.y}px) scale(${chatLayout.scale})`,
+            transformOrigin: "top right",
+            cursor: "grab",
+            touchAction: "none",
+          }}
+          onPointerDown={(event) => startDrag("chat", event)}
+          onPointerMove={handleDragMove}
+          onPointerUp={stopDrag}
+          onPointerCancel={stopDrag}
+          onWheel={(event) => handleLayoutWheel("chat", event)}
+        >
+          <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
+            YouTube Chat · {youtubeChatStatus}
+          </div>
+          {youtubeMessages.map((message) => (
+            <div
+              key={message.id}
+              className="flex gap-2 rounded-2xl border border-white/20 bg-white/92 px-3 py-2 text-sm text-slate-900 shadow-lg backdrop-blur-sm"
+            >
+              {message.authorImageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={message.authorImageUrl} alt="" className="mt-0.5 size-7 flex-none rounded-full bg-slate-200" />
+              ) : (
+                <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
+                  {message.authorName.slice(0, 1)}
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
+                  {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
+                  {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
+                  {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
+                </div>
+                <div className="break-words leading-relaxed">{message.message}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {lastReply && (
+        <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 w-[min(840px,calc(100vw-48px))] -translate-x-1/2 rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
+          {lastReply}
+        </div>
+      )}
+    </main>
+  );
+}

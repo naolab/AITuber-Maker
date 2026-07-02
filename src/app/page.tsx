@@ -19,7 +19,7 @@ import {
   Video,
   Wand2,
 } from "lucide-react";
-import { ChangeEvent, DragEvent, ReactElement, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import type { GeneratedSprite, Mode, MouthFrame, MouthlessCleanPlate, MouthlessMask, MouthSpriteName, MouthTrack, Quad, SpeedMode, WorkerMessage } from "@/lib/materials";
 import {
@@ -78,6 +78,26 @@ type AivisSpeaker = {
 
 type WindowWithWebkitAudio = Window & {
   webkitAudioContext?: typeof AudioContext;
+};
+
+type YouTubeChatMessage = {
+  id: string;
+  authorName: string;
+  authorImageUrl: string;
+  message: string;
+  publishedAt: string;
+  type: string;
+  isOwner: boolean;
+  isModerator: boolean;
+  isSponsor: boolean;
+};
+
+type YouTubeLiveChatResponse = {
+  liveChatId?: string;
+  nextPageToken?: string;
+  pollingIntervalMillis?: number;
+  messages?: YouTubeChatMessage[];
+  error?: string;
 };
 
 const revokeObjectUrl = (url: string) => {
@@ -165,6 +185,8 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
   { key: "sad", label: "悲しい" },
 ];
 
+const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("materials");
   const [isHeaderVisible, setIsHeaderVisible] = useState(true);
@@ -209,6 +231,14 @@ export default function Home() {
   const [lastReply, setLastReply] = useState("");
   const [lastUserMessage, setLastUserMessage] = useState("");
   const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
+  const [youtubeApiKey, setYoutubeApiKey] = useState("");
+  const [youtubeVideoId, setYoutubeVideoId] = useState("");
+  const [youtubeLiveChatId, setYoutubeLiveChatId] = useState("");
+  const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
+  const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
+  const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
+  const youtubeNextPageTokenRef = useRef("");
+  const youtubeMessageIdsRef = useRef<Set<string>>(new Set());
 
   const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
     normal: { videoUrl: "", track: null, mouthSprites: [] },
@@ -287,6 +317,39 @@ export default function Home() {
     mouthSpriteUrlsRef.current = nextSprites.map((sprite) => sprite.url);
     setMouthSprites(nextSprites);
   };
+  const [liveAssetSyncStatus, setLiveAssetSyncStatus] = useState("未同期");
+
+  const syncEmotionAssetForObs = async (
+    emotion: Emotion,
+    type: "video" | "track" | "mouthSprite",
+    fileOrData: File | MouthTrack,
+    spriteName?: MouthSpriteName,
+    trackName?: string,
+  ) => {
+    const formData = new FormData();
+    formData.set("emotion", emotion);
+    formData.set("type", type);
+    if (spriteName) formData.set("spriteName", spriteName);
+
+    if (type === "track") {
+      const file = new File([JSON.stringify(fileOrData as MouthTrack)], trackName || "mouth_track.json", {
+        type: "application/json",
+      });
+      formData.set("file", file);
+    } else {
+      formData.set("file", fileOrData as File);
+    }
+
+    const response = await fetch("/api/live-assets", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(data?.error || "OBS用素材の同期に失敗しました");
+    }
+  };
 
   // Helper to save emotion asset files to IndexedDB
   const saveEmotionAssetToDb = async (emotion: Emotion, type: "video" | "track" | "mouthSprite", fileOrData: File | MouthTrack, spriteName?: MouthSpriteName, trackName?: string) => {
@@ -299,8 +362,39 @@ export default function Home() {
         const trackData = fileOrData as MouthTrack;
         await setAsset(dbKey, { track: trackData, name: trackName || "mouth_track.json" });
       }
+      await syncEmotionAssetForObs(emotion, type, fileOrData, spriteName, trackName);
+      setLiveAssetSyncStatus("OBS用素材を同期済み");
     } catch (err) {
-      console.error(`Failed to save asset ${type} for ${emotion} to IndexedDB:`, err);
+      console.error(`Failed to save asset ${type} for ${emotion}:`, err);
+      setLiveAssetSyncStatus(err instanceof Error ? err.message : "OBS用素材の同期に失敗");
+    }
+  };
+
+  const syncAllLiveAssetsForObs = async () => {
+    setLiveAssetSyncStatus("OBS用素材を同期中...");
+    try {
+      for (const emotion of EMOTIONS.map((item) => item.key)) {
+        const videoData = await getAsset<{ file: File; name: string }>(`emotion_${emotion}_video`);
+        if (videoData?.file) {
+          await syncEmotionAssetForObs(emotion, "video", videoData.file);
+        }
+
+        const trackData = await getAsset<{ track: MouthTrack; name: string }>(`emotion_${emotion}_track`);
+        if (trackData?.track) {
+          await syncEmotionAssetForObs(emotion, "track", trackData.track, undefined, trackData.name);
+        }
+
+        for (const name of mouthSpriteNames) {
+          const spriteData = await getAsset<{ file: File; name: string }>(`emotion_${emotion}_mouthSprite_${name}`);
+          if (spriteData?.file) {
+            await syncEmotionAssetForObs(emotion, "mouthSprite", spriteData.file, name);
+          }
+        }
+      }
+      setLiveAssetSyncStatus("OBS用素材を同期済み");
+    } catch (error) {
+      console.error(error);
+      setLiveAssetSyncStatus(error instanceof Error ? error.message : "OBS用素材の同期に失敗");
     }
   };
 
@@ -313,6 +407,10 @@ export default function Home() {
       const speaker = localStorage.getItem("aivis_speaker") || "2";
       const bgType = (localStorage.getItem("runtime_bg_type") as "color" | "image") || "color";
       const bgColor = localStorage.getItem("runtime_bg_color") || "#f7f8fb";
+      const savedYoutubeApiKey = localStorage.getItem("youtube_api_key") || "";
+      const savedYoutubeVideoId = localStorage.getItem("youtube_video_id") || "";
+      const savedYoutubeLiveChatId = localStorage.getItem("youtube_live_chat_id") || "";
+      const savedYoutubeChatEnabled = localStorage.getItem("youtube_chat_enabled") === "true";
 
       setOpenaiApiKey(key);
       setOpenaiModel(model);
@@ -321,6 +419,10 @@ export default function Home() {
       setSelectedSpeaker(speaker);
       setRuntimeBgType(bgType === "image" ? "color" : bgType);
       setRuntimeBgColor(bgColor);
+      setYoutubeApiKey(savedYoutubeApiKey);
+      setYoutubeVideoId(savedYoutubeVideoId);
+      setYoutubeLiveChatId(savedYoutubeLiveChatId);
+      setIsYoutubeChatEnabled(savedYoutubeChatEnabled);
 
       if (url) {
         void fetchSpeakers(url);
@@ -456,6 +558,109 @@ export default function Home() {
     localStorage.setItem("aivis_speaker", speaker);
   };
 
+  const handleYoutubeApiKeyChange = (key: string) => {
+    setYoutubeApiKey(key);
+    localStorage.setItem("youtube_api_key", key);
+  };
+
+  const handleYoutubeVideoIdChange = (videoId: string) => {
+    setYoutubeVideoId(videoId);
+    localStorage.setItem("youtube_video_id", videoId);
+    youtubeNextPageTokenRef.current = "";
+    youtubeMessageIdsRef.current = new Set();
+    setYoutubeMessages([]);
+  };
+
+  const handleYoutubeLiveChatIdChange = (liveChatId: string) => {
+    setYoutubeLiveChatId(liveChatId);
+    localStorage.setItem("youtube_live_chat_id", liveChatId);
+    youtubeNextPageTokenRef.current = "";
+    youtubeMessageIdsRef.current = new Set();
+    setYoutubeMessages([]);
+  };
+
+  const handleYoutubeChatEnabledChange = (enabled: boolean) => {
+    setIsYoutubeChatEnabled(enabled);
+    localStorage.setItem("youtube_chat_enabled", String(enabled));
+    if (!enabled) {
+      setYoutubeChatStatus("停止中");
+      youtubeNextPageTokenRef.current = "";
+    }
+  };
+
+  const fetchYoutubeLiveChat = useCallback(async () => {
+    if (!youtubeApiKey || (!youtubeVideoId && !youtubeLiveChatId)) {
+      setYoutubeChatStatus("YouTube APIキーと動画IDまたはliveChatIdが必要");
+      return 5000;
+    }
+
+    const params = new URLSearchParams({
+      apiKey: youtubeApiKey,
+    });
+    if (youtubeVideoId) params.set("videoId", youtubeVideoId);
+    if (youtubeLiveChatId) params.set("liveChatId", youtubeLiveChatId);
+    if (youtubeNextPageTokenRef.current) params.set("pageToken", youtubeNextPageTokenRef.current);
+
+    const response = await fetch(`/api/youtube/live-chat?${params.toString()}`, {
+      cache: "no-store",
+    });
+    const data = (await response.json()) as YouTubeLiveChatResponse;
+    if (!response.ok) {
+      throw new Error(data.error || "YouTubeライブチャットの取得に失敗しました");
+    }
+
+    if (data.liveChatId && data.liveChatId !== youtubeLiveChatId) {
+      setYoutubeLiveChatId(data.liveChatId);
+      localStorage.setItem("youtube_live_chat_id", data.liveChatId);
+    }
+    youtubeNextPageTokenRef.current = data.nextPageToken || "";
+
+    const incoming = (data.messages ?? []).filter((message) => message.message.trim());
+    if (incoming.length) {
+      setYoutubeMessages((current) => {
+        const next = [...current];
+        incoming.forEach((message) => {
+          if (youtubeMessageIdsRef.current.has(message.id)) return;
+          youtubeMessageIdsRef.current.add(message.id);
+          next.push(message);
+        });
+        return next.slice(-12);
+      });
+    }
+
+    setYoutubeChatStatus(`接続中: ${incoming.length}件取得`);
+    return Math.max(1000, data.pollingIntervalMillis || 5000);
+  }, [youtubeApiKey, youtubeVideoId, youtubeLiveChatId]);
+
+  useEffect(() => {
+    if (mode !== "runtime" || !isYoutubeChatEnabled) return;
+
+    let stopped = false;
+    let timeoutId = 0;
+
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const nextInterval = await fetchYoutubeLiveChat();
+        if (!stopped) {
+          timeoutId = window.setTimeout(tick, nextInterval);
+        }
+      } catch (error) {
+        setYoutubeChatStatus(error instanceof Error ? error.message : "YouTubeコメント取得に失敗");
+        if (!stopped) {
+          timeoutId = window.setTimeout(tick, 8000);
+        }
+      }
+    };
+
+    void tick();
+
+    return () => {
+      stopped = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [mode, isYoutubeChatEnabled, fetchYoutubeLiveChat]);
+
   const sendChatMessage = async () => {
     if (!chatInput.trim() || !openaiApiKey || isChatSending) return;
     setLastUserMessage(chatInput);
@@ -541,6 +746,7 @@ JSONフォーマット例:
       }
 
       const audioBuffer = await synthRes.arrayBuffer();
+      const liveAudioBuffer = audioBuffer.slice(0);
 
       // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
       setPendingSpeech({
@@ -548,6 +754,17 @@ JSONフォーマット例:
         text: cleanText,
         audioBuffer,
       });
+
+      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+        const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
+        channel.postMessage({
+          type: "speech",
+          emotion,
+          text: cleanText,
+          audioBuffer: liveAudioBuffer,
+        });
+        channel.close();
+      }
 
       setChatInput("");
     } catch (err) {
@@ -2276,6 +2493,42 @@ JSONフォーマット例:
               </div>
             )}
 
+            {isYoutubeChatEnabled && (
+              <div className="pointer-events-none absolute right-6 top-24 z-40 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] flex-col justify-end gap-2 overflow-hidden">
+                <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
+                  YouTube Chat · {youtubeChatStatus}
+                </div>
+                {youtubeMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className="flex gap-2 rounded-2xl border border-white/20 bg-white/92 px-3 py-2 text-sm text-slate-900 shadow-lg backdrop-blur-sm"
+                  >
+                    {message.authorImageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={message.authorImageUrl}
+                        alt=""
+                        className="mt-0.5 size-7 flex-none rounded-full bg-slate-200"
+                      />
+                    ) : (
+                      <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
+                        {message.authorName.slice(0, 1)}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
+                        {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
+                        {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
+                        {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
+                      </div>
+                      <div className="break-words leading-relaxed">{message.message}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Chat Input Floating Form */}
             <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 flex flex-col items-center gap-4">
               {/* Latest User Message Bubble */}
@@ -2434,6 +2687,93 @@ JSONフォーマット例:
                       <option value="2">四国めたん (ノーマル) [接続待ち...]</option>
                     )}
                   </select>
+                </div>
+
+                {/* YouTube Live Chat */}
+                <div className="h-px bg-slate-200 my-4" />
+
+                <div className="grid gap-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <label className="text-sm font-semibold text-slate-800">YouTubeライブチャット表示</label>
+                      <p className="mt-1 text-xs text-slate-500">配信モード画面の右上にライブチャットを重ねます。</p>
+                    </div>
+                    <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-teal-600"
+                        checked={isYoutubeChatEnabled}
+                        onChange={(event) => handleYoutubeChatEnabledChange(event.target.checked)}
+                      />
+                      表示する
+                    </label>
+                  </div>
+
+                  <div className="grid gap-2">
+                    <label className="text-sm font-semibold text-slate-800">YouTube Data API キー</label>
+                    <input
+                      type="password"
+                      placeholder="AIza..."
+                      value={youtubeApiKey}
+                      onChange={(event) => handleYoutubeApiKeyChange(event.target.value)}
+                      className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                    />
+                    <p className="text-xs text-slate-500">APIキーはブラウザの localStorage に保存され、ローカルAPI経由でYouTubeに送信されます。</p>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="grid gap-2">
+                      <label className="text-sm font-semibold text-slate-800">ライブ動画ID</label>
+                      <input
+                        type="text"
+                        placeholder="YouTube URL末尾のID"
+                        value={youtubeVideoId}
+                        onChange={(event) => handleYoutubeVideoIdChange(event.target.value)}
+                        className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <label className="text-sm font-semibold text-slate-800">liveChatId</label>
+                      <input
+                        type="text"
+                        placeholder="分かる場合だけ指定"
+                        value={youtubeLiveChatId}
+                        onChange={(event) => handleYoutubeLiveChatIdChange(event.target.value)}
+                        className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    状態: {youtubeChatStatus}
+                  </div>
+                </div>
+
+                {/* OBS Live Output */}
+                <div className="h-px bg-slate-200 my-4" />
+
+                <div className="grid gap-3">
+                  <div>
+                    <label className="text-sm font-semibold text-slate-800">OBS専用画面</label>
+                    <p className="mt-1 text-xs text-slate-500">OBSにはこの専用画面だけを映します。設定画面や操作中のUIは配信に出ません。</p>
+                  </div>
+                  <a
+                    href="/live"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white"
+                  >
+                    <Radio className="size-4" />
+                    OBS専用画面を開く
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => void syncAllLiveAssetsForObs()}
+                    className="flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    <Upload className="size-4" />
+                    OBSブラウザソース用に素材を同期
+                  </button>
+                  <p className="text-xs text-slate-500">状態: {liveAssetSyncStatus}</p>
                 </div>
 
                 {/* Emotion Assets Settings */}

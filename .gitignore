@@ -29,6 +29,8 @@ new-app-requirements.md
 # local model artifacts
 public/models/*
 !public/models/.gitkeep
+public/live-assets/*
+!public/live-assets/.gitkeep
 
 # debug
 npm-debug.log*
