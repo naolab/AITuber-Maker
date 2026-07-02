@@ -3,7 +3,7 @@
 import { PointerEvent, WheelEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import type { GeneratedSprite, MouthTrack, Quad } from "@/lib/materials";
-import { drawWarpedPatch } from "@/lib/materials";
+import { drawWarpedPatch, waitForEvent } from "@/lib/materials";
 
 type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
 
@@ -63,6 +63,12 @@ type StoredLiveSpeech = {
 
 type LiveSpeechResponse = {
   speech?: StoredLiveSpeech | null;
+};
+
+type PendingSpeech = {
+  emotion: Emotion;
+  text: string;
+  audioBuffer: ArrayBuffer;
 };
 
 type ServerLiveAsset = {
@@ -262,6 +268,7 @@ export default function LiveOutputPage() {
   const [activeEmotion, setActiveEmotion] = useState<Emotion>("normal");
   const [mouthShape, setMouthShape] = useState("closed");
   const [lastReply, setLastReply] = useState("");
+  const [pendingSpeech, setPendingSpeech] = useState<PendingSpeech | null>(null);
   const [bgType, setBgType] = useState<"color" | "image">("color");
   const [bgColor, setBgColor] = useState("#ffffff");
   const [bgImageUrl] = useState("");
@@ -273,8 +280,11 @@ export default function LiveOutputPage() {
   const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
   const [characterLayout, setCharacterLayout] = useState<OverlayLayout>(DEFAULT_CHARACTER_LAYOUT);
   const [chatLayout, setChatLayout] = useState<OverlayLayout>(DEFAULT_CHAT_LAYOUT);
+  const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef0 = useRef<HTMLVideoElement | null>(null);
+  const videoRef1 = useRef<HTMLVideoElement | null>(null);
+  const activeVideoIndexRef = useRef<0 | 1>(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef(0);
   const characterLayoutRef = useRef(DEFAULT_CHARACTER_LAYOUT);
@@ -283,6 +293,10 @@ export default function LiveOutputPage() {
   const assetsRef = useRef(assets);
   const activeEmotionRef = useRef<Emotion>("normal");
   const mouthShapeRef = useRef("closed");
+  const videoAsset0Ref = useRef<Emotion>("normal");
+  const videoAsset1Ref = useRef<Emotion>("normal");
+  const pendingSpeechRef = useRef<PendingSpeech | null>(null);
+  const isSpeakingRef = useRef(false);
   const imageCacheRef = useRef<Record<string, HTMLImageElement>>({});
   const objectUrlsRef = useRef<string[]>([]);
   const youtubeNextPageTokenRef = useRef("");
@@ -299,9 +313,35 @@ export default function LiveOutputPage() {
     activeEmotionRef.current = activeEmotion;
   }, [activeEmotion]);
 
+  const getActiveVideo = () => (activeVideoIndexRef.current === 0 ? videoRef0.current : videoRef1.current);
+
+  const loadEmotionIntoVideo = useCallback(async (emotion: Emotion, video: HTMLVideoElement) => {
+    const asset = assetsRef.current[emotion];
+    if (!asset?.videoUrl) return false;
+    if (video.src !== asset.videoUrl) {
+      video.src = asset.videoUrl;
+      video.load();
+      await waitForEvent(video, "canplay");
+    }
+    return true;
+  }, []);
+
+  const switchActiveVideo = () => {
+    const activeIndex = activeVideoIndexRef.current;
+    const nextIndex: 0 | 1 = activeIndex === 0 ? 1 : 0;
+    const previousVideo = activeIndex === 0 ? videoRef0.current : videoRef1.current;
+    previousVideo?.pause();
+    activeVideoIndexRef.current = nextIndex;
+    setActiveVideoIndex(nextIndex);
+  };
+
   useEffect(() => {
     mouthShapeRef.current = mouthShape;
   }, [mouthShape]);
+
+  useEffect(() => {
+    pendingSpeechRef.current = pendingSpeech;
+  }, [pendingSpeech]);
 
   useEffect(() => {
     youtubeLiveChatIdRef.current = youtubeLiveChatId;
@@ -465,10 +505,13 @@ export default function LiveOutputPage() {
 
     setStatus("配信待機中");
     setActiveEmotion("normal");
-    const video = videoRef.current;
+    const video = videoRef0.current;
     if (video) {
       video.src = normalAsset.videoUrl;
       video.load();
+      videoAsset0Ref.current = "normal";
+      activeVideoIndexRef.current = 0;
+      setActiveVideoIndex(0);
       void video.play();
     }
   }, []);
@@ -496,10 +539,13 @@ export default function LiveOutputPage() {
   }, [loadAssets, loadSettings]);
 
   useEffect(() => {
-    const video = videoRef.current;
+    const video = videoRef0.current;
     if (!video || !assets.normal.videoUrl) return;
     video.src = assets.normal.videoUrl;
     video.load();
+    videoAsset0Ref.current = "normal";
+    activeVideoIndexRef.current = 0;
+    setActiveVideoIndex(0);
     void video.play();
   }, [assets.normal.videoUrl]);
 
@@ -554,41 +600,67 @@ export default function LiveOutputPage() {
     source.onended = () => {
       cancelAnimationFrame(frame);
       setMouthShape("closed");
-      setActiveEmotion("normal");
-      setStatus("配信待機中");
-      const normalAsset = assetsRef.current.normal;
-      const video = videoRef.current;
-      if (video && normalAsset.videoUrl && video.src !== normalAsset.videoUrl) {
-        video.src = normalAsset.videoUrl;
-        video.load();
-        void video.play();
-      }
       void audioCtx.close();
+      isSpeakingRef.current = false;
     };
 
+    isSpeakingRef.current = true;
     setStatus("発話中");
     source.start(0);
     sync();
   }, []);
 
-  const playLiveSpeech = useCallback(
-    async (speech: { emotion: Emotion; text: string; audioBuffer: ArrayBuffer }) => {
-      const nextEmotion = assetsRef.current[speech.emotion]?.videoUrl ? speech.emotion : "normal";
-      const nextAsset = assetsRef.current[nextEmotion];
-      const video = videoRef.current;
-      setActiveEmotion(nextEmotion);
-      setLastReply(speech.text);
+  const queueLiveSpeech = useCallback((speech: PendingSpeech) => {
+    setPendingSpeech(speech);
+    pendingSpeechRef.current = speech;
+  }, []);
 
-      if (video && nextAsset.videoUrl && video.src !== nextAsset.videoUrl) {
-        video.src = nextAsset.videoUrl;
-        video.load();
-        void video.play();
+  const handleVideoEnded = useCallback(async () => {
+    const activeIndex = activeVideoIndexRef.current;
+    const currentVideo = activeIndex === 0 ? videoRef0.current : videoRef1.current;
+    const nextVideo = activeIndex === 0 ? videoRef1.current : videoRef0.current;
+    const currentAssetRef = activeIndex === 0 ? videoAsset0Ref : videoAsset1Ref;
+    const nextAssetRef = activeIndex === 0 ? videoAsset1Ref : videoAsset0Ref;
+
+    if (!currentVideo || !nextVideo) return;
+
+    const pending = pendingSpeechRef.current;
+    if (pending) {
+      const nextEmotion = assetsRef.current[pending.emotion]?.videoUrl ? pending.emotion : "normal";
+      const loaded = await loadEmotionIntoVideo(nextEmotion, nextVideo);
+      if (loaded) {
+        nextAssetRef.current = nextEmotion;
+        setActiveEmotion(nextEmotion);
+        activeEmotionRef.current = nextEmotion;
       }
 
-      await playAudioAndSyncMouth(speech.audioBuffer);
-    },
-    [playAudioAndSyncMouth],
-  );
+      setLastReply(pending.text);
+      await playAudioAndSyncMouth(pending.audioBuffer);
+      setPendingSpeech(null);
+      pendingSpeechRef.current = null;
+
+      void nextVideo.play();
+      switchActiveVideo();
+      return;
+    }
+
+    const currentEmotion = currentAssetRef.current;
+    if (!isSpeakingRef.current && currentEmotion !== "normal") {
+      const loaded = await loadEmotionIntoVideo("normal", nextVideo);
+      if (loaded) {
+        nextAssetRef.current = "normal";
+        setActiveEmotion("normal");
+        activeEmotionRef.current = "normal";
+        setStatus("配信待機中");
+        void nextVideo.play();
+        switchActiveVideo();
+      }
+      return;
+    }
+
+    currentVideo.currentTime = 0;
+    void currentVideo.play();
+  }, [loadEmotionIntoVideo, playAudioAndSyncMouth]);
 
   useEffect(() => {
     if (!("BroadcastChannel" in window)) {
@@ -601,14 +673,15 @@ export default function LiveOutputPage() {
       if (message?.type !== "speech" || !isEmotion(message.emotion)) return;
       if (message.id) lastSpeechIdRef.current = message.id;
 
-      void playLiveSpeech(message).catch((error) => {
-        console.error(error);
-        setStatus(error instanceof Error ? error.message : "音声再生に失敗しました");
+      queueLiveSpeech({
+        emotion: message.emotion,
+        text: message.text,
+        audioBuffer: message.audioBuffer,
       });
     };
 
     return () => channel.close();
-  }, [playLiveSpeech]);
+  }, [queueLiveSpeech]);
 
   useEffect(() => {
     let disposed = false;
@@ -621,7 +694,7 @@ export default function LiveOutputPage() {
         const speech = data.speech;
         if (!disposed && speech && speech.id !== lastSpeechIdRef.current && isEmotion(speech.emotion)) {
           lastSpeechIdRef.current = speech.id;
-          await playLiveSpeech({
+          queueLiveSpeech({
             emotion: speech.emotion,
             text: speech.text,
             audioBuffer: base64ToArrayBuffer(speech.audioBase64),
@@ -639,11 +712,11 @@ export default function LiveOutputPage() {
       disposed = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [playLiveSpeech]);
+  }, [queueLiveSpeech]);
 
   useEffect(() => {
     const tick = () => {
-      const video = videoRef.current;
+      const video = getActiveVideo();
       const canvas = canvasRef.current;
       const asset = assetsRef.current[activeEmotionRef.current];
 
@@ -784,12 +857,24 @@ export default function LiveOutputPage() {
         >
           <div className="relative h-full w-full">
             <video
-              ref={videoRef}
+              ref={videoRef0}
               className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+              style={{ opacity: activeVideoIndex === 0 ? 1 : 0 }}
               autoPlay
-              loop
+              loop={false}
               muted
               playsInline
+              onEnded={handleVideoEnded}
+            />
+            <video
+              ref={videoRef1}
+              className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+              style={{ opacity: activeVideoIndex === 1 ? 1 : 0 }}
+              autoPlay
+              loop={false}
+              muted
+              playsInline
+              onEnded={handleVideoEnded}
             />
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
           </div>
