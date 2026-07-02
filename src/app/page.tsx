@@ -177,6 +177,15 @@ interface PendingSpeech {
   audioBuffer: ArrayBuffer;
 }
 
+type LiveSettingsPatch = Partial<{
+  bgType: "color" | "image";
+  bgColor: string;
+  youtubeApiKey: string;
+  youtubeVideoId: string;
+  youtubeLiveChatId: string;
+  youtubeChatEnabled: boolean;
+}>;
+
 const EMOTIONS: { key: Emotion; label: string }[] = [
   { key: "normal", label: "通常" },
   { key: "happy", label: "嬉しい" },
@@ -186,6 +195,18 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 ];
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
+
+const saveLiveSettingsForObs = async (patch: LiveSettingsPatch) => {
+  const response = await fetch("/api/live-settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+
+  if (!response.ok) {
+    throw new Error("OBS用設定の保存に失敗しました");
+  }
+};
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("materials");
@@ -391,6 +412,14 @@ export default function Home() {
           }
         }
       }
+      await saveLiveSettingsForObs({
+        bgType: runtimeBgType,
+        bgColor: runtimeBgColor,
+        youtubeApiKey,
+        youtubeVideoId,
+        youtubeLiveChatId,
+        youtubeChatEnabled: isYoutubeChatEnabled,
+      });
       setLiveAssetSyncStatus("OBS用素材を同期済み");
     } catch (error) {
       console.error(error);
@@ -411,18 +440,28 @@ export default function Home() {
       const savedYoutubeVideoId = localStorage.getItem("youtube_video_id") || "";
       const savedYoutubeLiveChatId = localStorage.getItem("youtube_live_chat_id") || "";
       const savedYoutubeChatEnabled = localStorage.getItem("youtube_chat_enabled") === "true";
+      const liveSettings = await fetch("/api/live-settings", { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null) as LiveSettingsPatch | null;
+
+      const nextBgType = liveSettings?.bgType || bgType;
+      const nextBgColor = liveSettings?.bgColor || bgColor;
+      const nextYoutubeApiKey = liveSettings?.youtubeApiKey || savedYoutubeApiKey;
+      const nextYoutubeVideoId = liveSettings?.youtubeVideoId || savedYoutubeVideoId;
+      const nextYoutubeLiveChatId = liveSettings?.youtubeLiveChatId || savedYoutubeLiveChatId;
+      const nextYoutubeChatEnabled = liveSettings?.youtubeChatEnabled ?? savedYoutubeChatEnabled;
 
       setOpenaiApiKey(key);
       setOpenaiModel(model);
       setTtsType(tts);
       setAivisUrl(url);
       setSelectedSpeaker(speaker);
-      setRuntimeBgType(bgType === "image" ? "color" : bgType);
-      setRuntimeBgColor(bgColor);
-      setYoutubeApiKey(savedYoutubeApiKey);
-      setYoutubeVideoId(savedYoutubeVideoId);
-      setYoutubeLiveChatId(savedYoutubeLiveChatId);
-      setIsYoutubeChatEnabled(savedYoutubeChatEnabled);
+      setRuntimeBgType(nextBgType === "image" ? "color" : nextBgType);
+      setRuntimeBgColor(nextBgColor);
+      setYoutubeApiKey(nextYoutubeApiKey);
+      setYoutubeVideoId(nextYoutubeVideoId);
+      setYoutubeLiveChatId(nextYoutubeLiveChatId);
+      setIsYoutubeChatEnabled(Boolean(nextYoutubeChatEnabled));
 
       if (url) {
         void fetchSpeakers(url);
@@ -561,11 +600,13 @@ export default function Home() {
   const handleYoutubeApiKeyChange = (key: string) => {
     setYoutubeApiKey(key);
     localStorage.setItem("youtube_api_key", key);
+    void saveLiveSettingsForObs({ youtubeApiKey: key });
   };
 
   const handleYoutubeVideoIdChange = (videoId: string) => {
     setYoutubeVideoId(videoId);
     localStorage.setItem("youtube_video_id", videoId);
+    void saveLiveSettingsForObs({ youtubeVideoId: videoId });
     youtubeNextPageTokenRef.current = "";
     youtubeMessageIdsRef.current = new Set();
     setYoutubeMessages([]);
@@ -574,6 +615,7 @@ export default function Home() {
   const handleYoutubeLiveChatIdChange = (liveChatId: string) => {
     setYoutubeLiveChatId(liveChatId);
     localStorage.setItem("youtube_live_chat_id", liveChatId);
+    void saveLiveSettingsForObs({ youtubeLiveChatId: liveChatId });
     youtubeNextPageTokenRef.current = "";
     youtubeMessageIdsRef.current = new Set();
     setYoutubeMessages([]);
@@ -582,6 +624,7 @@ export default function Home() {
   const handleYoutubeChatEnabledChange = (enabled: boolean) => {
     setIsYoutubeChatEnabled(enabled);
     localStorage.setItem("youtube_chat_enabled", String(enabled));
+    void saveLiveSettingsForObs({ youtubeChatEnabled: enabled });
     if (!enabled) {
       setYoutubeChatStatus("停止中");
       youtubeNextPageTokenRef.current = "";
@@ -612,6 +655,7 @@ export default function Home() {
     if (data.liveChatId && data.liveChatId !== youtubeLiveChatId) {
       setYoutubeLiveChatId(data.liveChatId);
       localStorage.setItem("youtube_live_chat_id", data.liveChatId);
+      void saveLiveSettingsForObs({ youtubeLiveChatId: data.liveChatId });
     }
     youtubeNextPageTokenRef.current = data.nextPageToken || "";
 
@@ -1468,6 +1512,7 @@ JSONフォーマット例:
       setRuntimeBgImageUrl(url);
       setRuntimeBgType("image");
       localStorage.setItem("runtime_bg_type", "image");
+      void saveLiveSettingsForObs({ bgType: "image" });
     }
   };
 
@@ -1476,6 +1521,7 @@ JSONフォーマット例:
     setRuntimeBgType("color");
     localStorage.setItem("runtime_bg_type", "color");
     localStorage.setItem("runtime_bg_color", color);
+    void saveLiveSettingsForObs({ bgType: "color", bgColor: color });
   };
 
   const loadVideoFile = (nextFile: File) => {
@@ -2988,6 +3034,7 @@ JSONフォーマット例:
                       onClick={() => {
                         setRuntimeBgType("color");
                         localStorage.setItem("runtime_bg_type", "color");
+                        void saveLiveSettingsForObs({ bgType: "color", bgColor: runtimeBgColor });
                       }}
                       className={`rounded px-3 py-1.5 text-xs font-medium ${
                         runtimeBgType === "color"
@@ -3002,6 +3049,7 @@ JSONフォーマット例:
                       onClick={() => {
                         setRuntimeBgType("image");
                         localStorage.setItem("runtime_bg_type", "image");
+                        void saveLiveSettingsForObs({ bgType: "image" });
                       }}
                       className={`rounded px-3 py-1.5 text-xs font-medium ${
                         runtimeBgType === "image"

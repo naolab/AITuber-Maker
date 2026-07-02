@@ -63,6 +63,17 @@ type ServerLiveAssetsResponse = {
   assets?: Partial<Record<Emotion, ServerLiveAsset>>;
 };
 
+type LiveSettingsResponse = Partial<{
+  bgType: "color" | "image";
+  bgColor: string;
+  youtubeApiKey: string;
+  youtubeVideoId: string;
+  youtubeLiveChatId: string;
+  youtubeChatEnabled: boolean;
+  characterLayout: OverlayLayout;
+  chatLayout: OverlayLayout;
+}>;
+
 type WindowWithWebkitAudio = Window & {
   webkitAudioContext?: typeof AudioContext;
 };
@@ -129,6 +140,20 @@ const readStoredLayout = (key: string, fallback: OverlayLayout) => {
 
 const writeStoredLayout = (key: string, value: OverlayLayout) => {
   localStorage.setItem(key, JSON.stringify(value));
+};
+
+const loadSharedLiveSettings = async () => {
+  const response = await fetch("/api/live-settings", { cache: "no-store" });
+  if (!response.ok) return null;
+  return (await response.json()) as LiveSettingsResponse;
+};
+
+const saveSharedLiveSettings = async (patch: LiveSettingsResponse) => {
+  await fetch("/api/live-settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
 };
 
 function initDb(): Promise<IDBDatabase> {
@@ -264,24 +289,29 @@ export default function LiveOutputPage() {
     chatLayoutRef.current = chatLayout;
   }, [chatLayout]);
 
-  const loadSettings = useCallback(() => {
-    const nextBgType = localStorage.getItem("runtime_bg_type") === "image" ? "image" : "color";
+  const loadSettings = useCallback(async () => {
+    const settings = await loadSharedLiveSettings().catch(() => null);
+    const nextBgType = settings?.bgType || (localStorage.getItem("runtime_bg_type") === "image" ? "image" : "color");
     setBgType(nextBgType);
-    setBgColor(localStorage.getItem("runtime_bg_color") || "#f7f8fb");
-    setYoutubeApiKey(localStorage.getItem("youtube_api_key") || "");
-    setYoutubeVideoId(localStorage.getItem("youtube_video_id") || "");
-    setYoutubeLiveChatId(localStorage.getItem("youtube_live_chat_id") || "");
-    setIsYoutubeChatEnabled(localStorage.getItem("youtube_chat_enabled") === "true");
-    setCharacterLayout(readStoredLayout(CHARACTER_LAYOUT_KEY, DEFAULT_CHARACTER_LAYOUT));
-    setChatLayout(readStoredLayout(CHAT_LAYOUT_KEY, DEFAULT_CHAT_LAYOUT));
+    setBgColor(settings?.bgColor || localStorage.getItem("runtime_bg_color") || "#f7f8fb");
+    setYoutubeApiKey(settings?.youtubeApiKey ?? localStorage.getItem("youtube_api_key") ?? "");
+    setYoutubeVideoId(settings?.youtubeVideoId ?? localStorage.getItem("youtube_video_id") ?? "");
+    setYoutubeLiveChatId(settings?.youtubeLiveChatId ?? localStorage.getItem("youtube_live_chat_id") ?? "");
+    setIsYoutubeChatEnabled(settings?.youtubeChatEnabled ?? localStorage.getItem("youtube_chat_enabled") === "true");
+
+    if (!dragStateRef.current) {
+      setCharacterLayout(settings?.characterLayout || readStoredLayout(CHARACTER_LAYOUT_KEY, DEFAULT_CHARACTER_LAYOUT));
+      setChatLayout(settings?.chatLayout || readStoredLayout(CHAT_LAYOUT_KEY, DEFAULT_CHAT_LAYOUT));
+    }
   }, []);
 
-  const updateLayout = useCallback((target: DragTarget, updater: (current: OverlayLayout) => OverlayLayout) => {
+  const updateLayout = useCallback((target: DragTarget, updater: (current: OverlayLayout) => OverlayLayout, persist = false) => {
     if (target === "character") {
       setCharacterLayout((current) => {
         const next = updater(current);
         characterLayoutRef.current = next;
         writeStoredLayout(CHARACTER_LAYOUT_KEY, next);
+        if (persist) void saveSharedLiveSettings({ characterLayout: next });
         return next;
       });
       return;
@@ -291,6 +321,7 @@ export default function LiveOutputPage() {
       const next = updater(current);
       chatLayoutRef.current = next;
       writeStoredLayout(CHAT_LAYOUT_KEY, next);
+      if (persist) void saveSharedLiveSettings({ chatLayout: next });
       return next;
     });
   }, []);
@@ -326,6 +357,8 @@ export default function LiveOutputPage() {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) return;
     dragStateRef.current = null;
+    const layout = dragState.target === "character" ? characterLayoutRef.current : chatLayoutRef.current;
+    void saveSharedLiveSettings(dragState.target === "character" ? { characterLayout: layout } : { chatLayout: layout });
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -337,7 +370,7 @@ export default function LiveOutputPage() {
     updateLayout(target, (current) => ({
       ...current,
       scale: clamp(current.scale - event.deltaY * 0.0015, 0.2, 5),
-    }));
+    }), true);
   }, [updateLayout]);
 
   const loadAssets = useCallback(async () => {
@@ -403,17 +436,21 @@ export default function LiveOutputPage() {
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
-      loadSettings();
+      void loadSettings();
       void loadAssets().catch((error) => {
         console.error(error);
         setStatus(error instanceof Error ? error.message : "配信素材の読み込みに失敗しました");
       });
     }, 0);
 
-    const handleStorage = () => loadSettings();
+    const settingsPoll = window.setInterval(() => {
+      void loadSettings();
+    }, 1500);
+    const handleStorage = () => void loadSettings();
     window.addEventListener("storage", handleStorage);
     return () => {
       window.clearTimeout(loadTimer);
+      window.clearInterval(settingsPoll);
       window.removeEventListener("storage", handleStorage);
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
@@ -601,6 +638,7 @@ export default function LiveOutputPage() {
       setYoutubeLiveChatId(data.liveChatId);
       youtubeLiveChatIdRef.current = data.liveChatId;
       localStorage.setItem("youtube_live_chat_id", data.liveChatId);
+      void saveSharedLiveSettings({ youtubeLiveChatId: data.liveChatId });
     }
     youtubeNextPageTokenRef.current = data.nextPageToken || "";
     setYoutubeChatStatus("接続中");
