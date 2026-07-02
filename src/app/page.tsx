@@ -116,6 +116,7 @@ const isImportableQuad = (value: unknown): value is Quad =>
   );
 
 type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
+type TtsType = "aivis" | "aivis-cloud" | "voicevox" | "custom";
 
 // IndexedDB Helper Functions
 const DB_NAME = "AITuberMakerAssets";
@@ -197,6 +198,45 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
 
+const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+};
+
+const saveSpeechForLiveOutput = async ({
+  id,
+  emotion,
+  text,
+  audioBuffer,
+  contentType,
+}: {
+  id: string;
+  emotion: Emotion;
+  text: string;
+  audioBuffer: ArrayBuffer;
+  contentType: string;
+}) => {
+  const response = await fetch("/api/live-speech", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id,
+      emotion,
+      text,
+      audioBase64: arrayBufferToBase64(audioBuffer),
+      contentType,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("OBS専用画面への発話送信に失敗しました");
+  }
+};
+
 const saveLiveSettingsForObs = async (patch: LiveSettingsPatch) => {
   const response = await fetch("/api/live-settings", {
     method: "POST",
@@ -244,10 +284,17 @@ export default function Home() {
     "gpt-4-turbo",
     "gpt-3.5-turbo",
   ]);
-  const [ttsType, setTtsType] = useState<"aivis" | "voicevox" | "custom">("aivis");
+  const [ttsType, setTtsType] = useState<TtsType>("aivis");
   const [aivisUrl, setAivisUrl] = useState("http://127.0.0.1:10101");
   const [selectedSpeaker, setSelectedSpeaker] = useState("2");
   const [speakers, setSpeakers] = useState<AivisSpeaker[]>([]);
+  const [aivisCloudApiKey, setAivisCloudApiKey] = useState("");
+  const [aivisCloudModelUuid, setAivisCloudModelUuid] = useState("");
+  const [aivisCloudStyleId, setAivisCloudStyleId] = useState("0");
+  const [aivisCloudStyleName, setAivisCloudStyleName] = useState("");
+  const [aivisCloudUserDictionaryUuid, setAivisCloudUserDictionaryUuid] = useState("");
+  const [aivisCloudOutputFormat, setAivisCloudOutputFormat] = useState("mp3");
+  const [aivisCloudSpeakingRate, setAivisCloudSpeakingRate] = useState("1.0");
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
@@ -436,9 +483,16 @@ export default function Home() {
     window.requestAnimationFrame(async () => {
       const key = localStorage.getItem("openai_api_key") || "";
       const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
-      const tts = (localStorage.getItem("tts_type") as "aivis" | "voicevox" | "custom") || "aivis";
+      const tts = (localStorage.getItem("tts_type") as TtsType) || "aivis";
       const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
       const speaker = localStorage.getItem("aivis_speaker") || "2";
+      const cloudApiKey = localStorage.getItem("aivis_cloud_api_key") || "";
+      const cloudModelUuid = localStorage.getItem("aivis_cloud_model_uuid") || "";
+      const cloudStyleId = localStorage.getItem("aivis_cloud_style_id") || "0";
+      const cloudStyleName = localStorage.getItem("aivis_cloud_style_name") || "";
+      const cloudUserDictionaryUuid = localStorage.getItem("aivis_cloud_user_dictionary_uuid") || "";
+      const cloudOutputFormat = localStorage.getItem("aivis_cloud_output_format") || "mp3";
+      const cloudSpeakingRate = localStorage.getItem("aivis_cloud_speaking_rate") || "1.0";
       const bgType = (localStorage.getItem("runtime_bg_type") as "color" | "image") || "color";
       const bgColor = localStorage.getItem("runtime_bg_color") || "#ffffff";
       const savedYoutubeApiKey = localStorage.getItem("youtube_api_key") || "";
@@ -463,6 +517,13 @@ export default function Home() {
       setTtsType(tts);
       setAivisUrl(url);
       setSelectedSpeaker(speaker);
+      setAivisCloudApiKey(cloudApiKey);
+      setAivisCloudModelUuid(cloudModelUuid);
+      setAivisCloudStyleId(cloudStyleId);
+      setAivisCloudStyleName(cloudStyleName);
+      setAivisCloudUserDictionaryUuid(cloudUserDictionaryUuid);
+      setAivisCloudOutputFormat(cloudOutputFormat);
+      setAivisCloudSpeakingRate(cloudSpeakingRate);
       setRuntimeBgType(nextBgType === "image" ? "color" : nextBgType);
       setRuntimeBgColor(nextBgColor);
       setYoutubeApiKey(nextYoutubeApiKey);
@@ -582,7 +643,7 @@ export default function Home() {
     localStorage.setItem("openai_model", model);
   };
 
-  const handleTtsTypeChange = (type: "aivis" | "voicevox" | "custom") => {
+  const handleTtsTypeChange = (type: TtsType) => {
     setTtsType(type);
     localStorage.setItem("tts_type", type);
     
@@ -593,7 +654,7 @@ export default function Home() {
       targetUrl = "http://127.0.0.1:50021";
     }
     
-    if (type !== "custom") {
+    if (type === "aivis" || type === "voicevox") {
       setAivisUrl(targetUrl);
       localStorage.setItem("aivis_url", targetUrl);
       void fetchSpeakers(targetUrl);
@@ -609,6 +670,41 @@ export default function Home() {
   const handleSpeakerChange = (speaker: string) => {
     setSelectedSpeaker(speaker);
     localStorage.setItem("aivis_speaker", speaker);
+  };
+
+  const handleAivisCloudApiKeyChange = (key: string) => {
+    setAivisCloudApiKey(key);
+    localStorage.setItem("aivis_cloud_api_key", key);
+  };
+
+  const handleAivisCloudModelUuidChange = (modelUuid: string) => {
+    setAivisCloudModelUuid(modelUuid);
+    localStorage.setItem("aivis_cloud_model_uuid", modelUuid);
+  };
+
+  const handleAivisCloudStyleIdChange = (styleId: string) => {
+    setAivisCloudStyleId(styleId);
+    localStorage.setItem("aivis_cloud_style_id", styleId);
+  };
+
+  const handleAivisCloudStyleNameChange = (styleName: string) => {
+    setAivisCloudStyleName(styleName);
+    localStorage.setItem("aivis_cloud_style_name", styleName);
+  };
+
+  const handleAivisCloudUserDictionaryUuidChange = (userDictionaryUuid: string) => {
+    setAivisCloudUserDictionaryUuid(userDictionaryUuid);
+    localStorage.setItem("aivis_cloud_user_dictionary_uuid", userDictionaryUuid);
+  };
+
+  const handleAivisCloudOutputFormatChange = (outputFormat: string) => {
+    setAivisCloudOutputFormat(outputFormat);
+    localStorage.setItem("aivis_cloud_output_format", outputFormat);
+  };
+
+  const handleAivisCloudSpeakingRateChange = (speakingRate: string) => {
+    setAivisCloudSpeakingRate(speakingRate);
+    localStorage.setItem("aivis_cloud_speaking_rate", speakingRate);
   };
 
   const handleYoutubeApiKeyChange = (key: string) => {
@@ -831,8 +927,16 @@ JSONフォーマット例:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           text: cleanText,
+          ttsType,
           speaker: Number(selectedSpeaker),
           aivisUrl,
+          aivisCloudApiKey,
+          aivisCloudModelUuid,
+          aivisCloudStyleId,
+          aivisCloudStyleName,
+          aivisCloudUserDictionaryUuid,
+          aivisCloudOutputFormat,
+          aivisCloudSpeakingRate,
         }),
       });
 
@@ -848,8 +952,10 @@ JSONフォーマット例:
         throw new Error(`音声合成に失敗しました: ${errMsg}`);
       }
 
+      const audioContentType = synthRes.headers.get("content-type") || "audio/wav";
       const audioBuffer = await synthRes.arrayBuffer();
       const liveAudioBuffer = audioBuffer.slice(0);
+      const speechId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
       if (isLocalSpeechPlaybackEnabled && isLocalCharacterPreviewEnabled) {
         // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
@@ -868,12 +974,20 @@ JSONフォーマット例:
         const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
         channel.postMessage({
           type: "speech",
+          id: speechId,
           emotion,
           text: cleanText,
           audioBuffer: liveAudioBuffer,
         });
         channel.close();
       }
+      await saveSpeechForLiveOutput({
+        id: speechId,
+        emotion,
+        text: cleanText,
+        audioBuffer: liveAudioBuffer.slice(0),
+        contentType: audioContentType,
+      });
 
       onSuccess?.();
     } catch (err) {
@@ -2790,6 +2904,17 @@ JSONフォーマット例:
                     </button>
                     <button
                       type="button"
+                      onClick={() => handleTtsTypeChange("aivis-cloud")}
+                      className={`rounded px-3 py-1.5 text-xs font-medium ${
+                        ttsType === "aivis-cloud"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      Aivis Cloud
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => handleTtsTypeChange("voicevox")}
                       className={`rounded px-3 py-1.5 text-xs font-medium ${
                         ttsType === "voicevox"
@@ -2813,6 +2938,97 @@ JSONフォーマット例:
                   </div>
                 </div>
 
+                {ttsType === "aivis-cloud" && (
+                  <div className="grid gap-4 rounded-md border border-slate-200 bg-slate-50 p-4">
+                    <div className="grid gap-2">
+                      <label className="text-sm font-semibold text-slate-800">Aivis Cloud API キー</label>
+                      <input
+                        type="password"
+                        placeholder="Aivis Cloud APIキー"
+                        value={aivisCloudApiKey}
+                        onChange={(event) => handleAivisCloudApiKeyChange(event.target.value)}
+                        className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                      />
+                      <p className="text-xs text-slate-500">APIキーはブラウザの localStorage に保存され、ローカルAPI経由でAivis Cloud APIへ送信されます。</p>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <label className="text-sm font-semibold text-slate-800">モデルUUID</label>
+                      <input
+                        type="text"
+                        placeholder="AivisHubのモデルUUID"
+                        value={aivisCloudModelUuid}
+                        onChange={(event) => handleAivisCloudModelUuidChange(event.target.value)}
+                        className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                      />
+                      <p className="text-xs text-slate-500">AivisHubのモデル詳細ページで確認できるUUIDを指定します。</p>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="grid gap-2">
+                        <label className="text-sm font-semibold text-slate-800">Style ID</label>
+                        <input
+                          type="number"
+                          placeholder="0"
+                          value={aivisCloudStyleId}
+                          onChange={(event) => handleAivisCloudStyleIdChange(event.target.value)}
+                          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <label className="text-sm font-semibold text-slate-800">Style Name</label>
+                        <input
+                          type="text"
+                          placeholder="Normal"
+                          value={aivisCloudStyleName}
+                          onChange={(event) => handleAivisCloudStyleNameChange(event.target.value)}
+                          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <p className="-mt-2 text-xs text-slate-500">Style IDを入力している場合はStyle Nameより優先します。</p>
+
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="grid gap-2">
+                        <label className="text-sm font-semibold text-slate-800">出力形式</label>
+                        <select
+                          value={aivisCloudOutputFormat}
+                          onChange={(event) => handleAivisCloudOutputFormatChange(event.target.value)}
+                          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                        >
+                          {["mp3", "wav", "aac", "opus", "flac"].map((format) => (
+                            <option key={format} value={format}>
+                              {format}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="grid gap-2">
+                        <label className="text-sm font-semibold text-slate-800">話速</label>
+                        <input
+                          type="number"
+                          min="0.5"
+                          max="2"
+                          step="0.1"
+                          value={aivisCloudSpeakingRate}
+                          onChange={(event) => handleAivisCloudSpeakingRateChange(event.target.value)}
+                          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <label className="text-sm font-semibold text-slate-800">ユーザー辞書UUID</label>
+                        <input
+                          type="text"
+                          placeholder="任意"
+                          value={aivisCloudUserDictionaryUuid}
+                          onChange={(event) => handleAivisCloudUserDictionaryUuidChange(event.target.value)}
+                          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Aivis Speech / VOICEVOX URL (Visible only when 'custom' is selected) */}
                 {ttsType === "custom" && (
                   <div className="grid gap-2">
@@ -2829,6 +3045,7 @@ JSONフォーマット例:
                 )}
 
                 {/* Aivis Speech Speaker */}
+                {ttsType !== "aivis-cloud" && (
                 <div className="grid gap-2">
                   <label className="text-sm font-semibold text-slate-800">キャラクター音声（話者）</label>
                   <select
@@ -2849,6 +3066,7 @@ JSONフォーマット例:
                     )}
                   </select>
                 </div>
+                )}
 
                 {/* YouTube Live Chat */}
                 <div className="h-px bg-slate-200 my-4" />

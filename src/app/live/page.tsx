@@ -46,9 +46,23 @@ type YouTubeLiveChatResponse = {
 
 type LiveSpeechMessage = {
   type: "speech";
+  id?: string;
   emotion: Emotion;
   text: string;
   audioBuffer: ArrayBuffer;
+};
+
+type StoredLiveSpeech = {
+  id: string;
+  emotion: Emotion;
+  text: string;
+  audioBase64: string;
+  contentType: string;
+  createdAt: number;
+};
+
+type LiveSpeechResponse = {
+  speech?: StoredLiveSpeech | null;
 };
 
 type ServerLiveAsset = {
@@ -105,6 +119,15 @@ const CHARACTER_LAYOUT_KEY = "live_character_layout";
 const CHAT_LAYOUT_KEY = "live_chat_layout";
 const DEFAULT_CHARACTER_LAYOUT: OverlayLayout = { x: 0, y: 0, scale: 1 };
 const DEFAULT_CHAT_LAYOUT: OverlayLayout = { x: 0, y: 0, scale: 1 };
+
+const base64ToArrayBuffer = (base64: string) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+};
 
 const isEmotion = (value: unknown): value is Emotion =>
   value === "normal" || value === "happy" || value === "angry" || value === "surprised" || value === "sad";
@@ -266,6 +289,7 @@ export default function LiveOutputPage() {
   const youtubeMessageIdsRef = useRef<Set<string>>(new Set());
   const youtubeLiveChatIdRef = useRef("");
   const youtubeSourceKeyRef = useRef("");
+  const lastSpeechIdRef = useRef("");
 
   useEffect(() => {
     assetsRef.current = assets;
@@ -547,22 +571,13 @@ export default function LiveOutputPage() {
     sync();
   }, []);
 
-  useEffect(() => {
-    if (!("BroadcastChannel" in window)) {
-      globalThis.setTimeout(() => setStatus("BroadcastChannelに対応していません"), 0);
-      return;
-    }
-
-    const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
-    channel.onmessage = (event: MessageEvent<LiveSpeechMessage>) => {
-      const message = event.data;
-      if (message?.type !== "speech" || !isEmotion(message.emotion)) return;
-
-      const nextEmotion = assetsRef.current[message.emotion]?.videoUrl ? message.emotion : "normal";
+  const playLiveSpeech = useCallback(
+    async (speech: { emotion: Emotion; text: string; audioBuffer: ArrayBuffer }) => {
+      const nextEmotion = assetsRef.current[speech.emotion]?.videoUrl ? speech.emotion : "normal";
       const nextAsset = assetsRef.current[nextEmotion];
       const video = videoRef.current;
       setActiveEmotion(nextEmotion);
-      setLastReply(message.text);
+      setLastReply(speech.text);
 
       if (video && nextAsset.videoUrl && video.src !== nextAsset.videoUrl) {
         video.src = nextAsset.videoUrl;
@@ -570,14 +585,61 @@ export default function LiveOutputPage() {
         void video.play();
       }
 
-      void playAudioAndSyncMouth(message.audioBuffer).catch((error) => {
+      await playAudioAndSyncMouth(speech.audioBuffer);
+    },
+    [playAudioAndSyncMouth],
+  );
+
+  useEffect(() => {
+    if (!("BroadcastChannel" in window)) {
+      return;
+    }
+
+    const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
+    channel.onmessage = (event: MessageEvent<LiveSpeechMessage>) => {
+      const message = event.data;
+      if (message?.type !== "speech" || !isEmotion(message.emotion)) return;
+      if (message.id) lastSpeechIdRef.current = message.id;
+
+      void playLiveSpeech(message).catch((error) => {
         console.error(error);
         setStatus(error instanceof Error ? error.message : "音声再生に失敗しました");
       });
     };
 
     return () => channel.close();
-  }, [playAudioAndSyncMouth]);
+  }, [playLiveSpeech]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/live-speech", { cache: "no-store" });
+        const data = (await response.json()) as LiveSpeechResponse;
+        const speech = data.speech;
+        if (!disposed && speech && speech.id !== lastSpeechIdRef.current && isEmotion(speech.emotion)) {
+          lastSpeechIdRef.current = speech.id;
+          await playLiveSpeech({
+            emotion: speech.emotion,
+            text: speech.text,
+            audioBuffer: base64ToArrayBuffer(speech.audioBase64),
+          });
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 1000);
+      }
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [playLiveSpeech]);
 
   useEffect(() => {
     const tick = () => {
@@ -679,8 +741,8 @@ export default function LiveOutputPage() {
       try {
         const interval = await fetchYoutubeLiveChat();
         if (!disposed) timer = window.setTimeout(poll, interval);
-      } catch (error) {
-        setYoutubeChatStatus(error instanceof Error ? error.message : "コメント取得に失敗");
+      } catch {
+        setYoutubeChatStatus("接続待機中");
         if (!disposed) timer = window.setTimeout(poll, 8000);
       }
     };
