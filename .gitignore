@@ -26,6 +26,7 @@
 AGENTS.md
 new-app-requirements.md
 .aituber-live-settings.json
+.aituber-live-chat-cache.json
 
 # local model artifacts
 public/models/*

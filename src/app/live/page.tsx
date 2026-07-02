@@ -39,6 +39,7 @@ type YouTubeLiveChatResponse = {
   liveChatId?: string;
   nextPageToken?: string;
   pollingIntervalMillis?: number;
+  fetchedCount?: number;
   messages?: YouTubeChatMessage[];
   error?: string;
 };
@@ -239,7 +240,7 @@ export default function LiveOutputPage() {
   const [mouthShape, setMouthShape] = useState("closed");
   const [lastReply, setLastReply] = useState("");
   const [bgType, setBgType] = useState<"color" | "image">("color");
-  const [bgColor, setBgColor] = useState("#f7f8fb");
+  const [bgColor, setBgColor] = useState("#ffffff");
   const [bgImageUrl] = useState("");
   const [youtubeApiKey, setYoutubeApiKey] = useState("");
   const [youtubeVideoId, setYoutubeVideoId] = useState("");
@@ -264,6 +265,7 @@ export default function LiveOutputPage() {
   const youtubeNextPageTokenRef = useRef("");
   const youtubeMessageIdsRef = useRef<Set<string>>(new Set());
   const youtubeLiveChatIdRef = useRef("");
+  const youtubeSourceKeyRef = useRef("");
 
   useEffect(() => {
     assetsRef.current = assets;
@@ -292,12 +294,25 @@ export default function LiveOutputPage() {
   const loadSettings = useCallback(async () => {
     const settings = await loadSharedLiveSettings().catch(() => null);
     const nextBgType = settings?.bgType || (localStorage.getItem("runtime_bg_type") === "image" ? "image" : "color");
+    const nextYoutubeApiKey = settings?.youtubeApiKey ?? localStorage.getItem("youtube_api_key") ?? "";
+    const nextYoutubeVideoId = settings?.youtubeVideoId ?? localStorage.getItem("youtube_video_id") ?? "";
+    const nextYoutubeLiveChatId = settings?.youtubeLiveChatId ?? localStorage.getItem("youtube_live_chat_id") ?? "";
+    const nextYoutubeSourceKey = `${nextYoutubeApiKey}|${nextYoutubeVideoId}|${nextYoutubeLiveChatId}`;
+
     setBgType(nextBgType);
-    setBgColor(settings?.bgColor || localStorage.getItem("runtime_bg_color") || "#f7f8fb");
-    setYoutubeApiKey(settings?.youtubeApiKey ?? localStorage.getItem("youtube_api_key") ?? "");
-    setYoutubeVideoId(settings?.youtubeVideoId ?? localStorage.getItem("youtube_video_id") ?? "");
-    setYoutubeLiveChatId(settings?.youtubeLiveChatId ?? localStorage.getItem("youtube_live_chat_id") ?? "");
+    setBgColor(settings?.bgColor || localStorage.getItem("runtime_bg_color") || "#ffffff");
+    setYoutubeApiKey(nextYoutubeApiKey);
+    setYoutubeVideoId(nextYoutubeVideoId);
+    setYoutubeLiveChatId(nextYoutubeLiveChatId);
     setIsYoutubeChatEnabled(settings?.youtubeChatEnabled ?? localStorage.getItem("youtube_chat_enabled") === "true");
+
+    if (youtubeSourceKeyRef.current !== nextYoutubeSourceKey) {
+      youtubeSourceKeyRef.current = nextYoutubeSourceKey;
+      youtubeNextPageTokenRef.current = "";
+      youtubeMessageIdsRef.current = new Set();
+      setYoutubeMessages([]);
+      setYoutubeChatStatus(nextYoutubeApiKey ? "接続準備中" : "APIキーと動画IDが必要");
+    }
 
     if (!dragStateRef.current) {
       setCharacterLayout(settings?.characterLayout || readStoredLayout(CHARACTER_LAYOUT_KEY, DEFAULT_CHARACTER_LAYOUT));
@@ -641,18 +656,12 @@ export default function LiveOutputPage() {
       void saveSharedLiveSettings({ youtubeLiveChatId: data.liveChatId });
     }
     youtubeNextPageTokenRef.current = data.nextPageToken || "";
-    setYoutubeChatStatus("接続中");
+    const incoming = data.messages?.filter((message) => message.message.trim()) ?? [];
+    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${incoming.length}件表示`);
 
-    if (data.messages?.length) {
-      setYoutubeMessages((prev) => {
-        const next = [...prev];
-        for (const message of data.messages || []) {
-          if (!message.message || youtubeMessageIdsRef.current.has(message.id)) continue;
-          youtubeMessageIdsRef.current.add(message.id);
-          next.push(message);
-        }
-        return next.slice(-12);
-      });
+    if (incoming.length) {
+      youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
+      setYoutubeMessages(incoming.slice(-12));
     }
 
     return Math.max(data.pollingIntervalMillis || 5000, 2000);
@@ -696,7 +705,7 @@ export default function LiveOutputPage() {
     >
       {activeAsset.videoUrl ? (
         <div
-          className="absolute left-1/2 top-1/2 z-10 select-none overflow-hidden bg-black"
+          className="absolute left-1/2 top-1/2 z-10 select-none overflow-hidden"
           style={{
             height: "min(82vh, 56.25vw)",
             width: "min(92vw, 145.78vh)",

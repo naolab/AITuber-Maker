@@ -22,7 +22,7 @@ type LiveSettings = {
 
 const DEFAULT_SETTINGS: LiveSettings = {
   bgType: "color",
-  bgColor: "#f7f8fb",
+  bgColor: "#ffffff",
   youtubeApiKey: "",
   youtubeVideoId: "",
   youtubeLiveChatId: "",

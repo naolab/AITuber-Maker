@@ -96,6 +96,7 @@ type YouTubeLiveChatResponse = {
   liveChatId?: string;
   nextPageToken?: string;
   pollingIntervalMillis?: number;
+  fetchedCount?: number;
   messages?: YouTubeChatMessage[];
   error?: string;
 };
@@ -277,7 +278,7 @@ export default function Home() {
   }, [pendingSpeech]);
 
   const [runtimeBgType, setRuntimeBgType] = useState<"color" | "image">("color");
-  const [runtimeBgColor, setRuntimeBgColor] = useState("#f7f8fb");
+  const [runtimeBgColor, setRuntimeBgColor] = useState("#ffffff");
   const [runtimeBgImageUrl, setRuntimeBgImageUrl] = useState("");
   const runtimeBgImageUrlRef = useRef("");
 
@@ -435,7 +436,7 @@ export default function Home() {
       const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
       const speaker = localStorage.getItem("aivis_speaker") || "2";
       const bgType = (localStorage.getItem("runtime_bg_type") as "color" | "image") || "color";
-      const bgColor = localStorage.getItem("runtime_bg_color") || "#f7f8fb";
+      const bgColor = localStorage.getItem("runtime_bg_color") || "#ffffff";
       const savedYoutubeApiKey = localStorage.getItem("youtube_api_key") || "";
       const savedYoutubeVideoId = localStorage.getItem("youtube_video_id") || "";
       const savedYoutubeLiveChatId = localStorage.getItem("youtube_live_chat_id") || "";
@@ -661,18 +662,11 @@ export default function Home() {
 
     const incoming = (data.messages ?? []).filter((message) => message.message.trim());
     if (incoming.length) {
-      setYoutubeMessages((current) => {
-        const next = [...current];
-        incoming.forEach((message) => {
-          if (youtubeMessageIdsRef.current.has(message.id)) return;
-          youtubeMessageIdsRef.current.add(message.id);
-          next.push(message);
-        });
-        return next.slice(-12);
-      });
+      youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
+      setYoutubeMessages(incoming.slice(-12));
     }
 
-    setYoutubeChatStatus(`接続中: ${incoming.length}件取得`);
+    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${incoming.length}件表示`);
     return Math.max(1000, data.pollingIntervalMillis || 5000);
   }, [youtubeApiKey, youtubeVideoId, youtubeLiveChatId]);
 
@@ -2506,7 +2500,7 @@ JSONフォーマット例:
                   maxHeight: "80vh",
                   aspectRatio: videoMeta.width && videoMeta.height ? `${videoMeta.width} / ${videoMeta.height}` : "16/9",
                 }}
-                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden bg-black"
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden"
                 onMouseDown={handleMouseDown}
                 onWheel={handleWheel}
               >
@@ -3066,9 +3060,8 @@ JSONフォーマット例:
                       {/* Presets */}
                       <div className="flex gap-2">
                         {[
-                          ["#f7f8fb", "標準"],
+                          ["#ffffff", "白"],
                           ["#00ff00", "グリーンバック"],
-                          ["#ffffff", "ホワイト"],
                           ["#000000", "ブラック"],
                         ].map(([color, name]) => (
                           <button
