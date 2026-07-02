@@ -117,6 +117,10 @@ const isImportableQuad = (value: unknown): value is Quad =>
 
 type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
 type TtsType = "aivis" | "aivis-cloud" | "voicevox" | "custom";
+type LiveSpeechSourceComment = {
+  authorName: string;
+  message: string;
+};
 
 // IndexedDB Helper Functions
 const DB_NAME = "AITuberMakerAssets";
@@ -214,12 +218,14 @@ const saveSpeechForLiveOutput = async ({
   text,
   audioBuffer,
   contentType,
+  sourceComment,
 }: {
   id: string;
   emotion: Emotion;
   text: string;
   audioBuffer: ArrayBuffer;
   contentType: string;
+  sourceComment?: LiveSpeechSourceComment;
 }) => {
   const response = await fetch("/api/live-speech", {
     method: "POST",
@@ -230,6 +236,7 @@ const saveSpeechForLiveOutput = async ({
       text,
       audioBase64: arrayBufferToBase64(audioBuffer),
       contentType,
+      sourceComment,
     }),
   });
   if (!response.ok) {
@@ -312,6 +319,7 @@ export default function Home() {
   const youtubeNextPageTokenRef = useRef("");
   const youtubeMessageIdsRef = useRef<Set<string>>(new Set());
   const selectedYoutubeMessage = youtubeMessages.find((message) => message.id === selectedYoutubeMessageId) ?? null;
+  const activeReplySourceCommentRef = useRef<LiveSpeechSourceComment | undefined>(undefined);
 
   const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
     normal: { videoUrl: "", track: null, mouthSprites: [] },
@@ -842,14 +850,17 @@ export default function Home() {
   const sendMessageToCharacter = async ({
     llmMessage,
     displayMessage,
+    sourceComment,
     onSuccess,
   }: {
     llmMessage: string;
     displayMessage?: string;
+    sourceComment?: LiveSpeechSourceComment;
     onSuccess?: () => void;
   }) => {
     const trimmedMessage = llmMessage.trim();
     if (!trimmedMessage || !openaiApiKey || isChatSending) return;
+    const speechSourceComment = sourceComment ?? activeReplySourceCommentRef.current;
     setLastUserMessage((displayMessage || trimmedMessage).trim());
     setIsChatSending(true);
 
@@ -975,6 +986,7 @@ JSONフォーマット例:
         channel.postMessage({
           type: "speech",
           id: speechId,
+          sourceComment: speechSourceComment,
           emotion,
           text: cleanText,
           audioBuffer: liveAudioBuffer,
@@ -987,6 +999,7 @@ JSONフォーマット例:
         text: cleanText,
         audioBuffer: liveAudioBuffer.slice(0),
         contentType: audioContentType,
+        sourceComment: speechSourceComment,
       });
 
       onSuccess?.();
@@ -994,6 +1007,7 @@ JSONフォーマット例:
       console.error("Chat & LipSync error:", err);
       alert(err instanceof Error ? err.message : "送信に失敗しました");
     } finally {
+      activeReplySourceCommentRef.current = undefined;
       setIsChatSending(false);
     }
   };
@@ -1006,12 +1020,18 @@ JSONフォーマット例:
   };
 
   const replyToYoutubeMessage = async (message: YouTubeChatMessage) => {
+    const sourceComment = {
+      authorName: message.authorName,
+      message: message.message,
+    };
+    activeReplySourceCommentRef.current = sourceComment;
     await sendMessageToCharacter({
       llmMessage: `YouTubeライブのコメントに、AITuberとして自然に返答してください。
 
 投稿者: ${message.authorName}
 コメント: ${message.message}`,
       displayMessage: `${message.authorName}: ${message.message}`,
+      sourceComment,
     });
   };
 

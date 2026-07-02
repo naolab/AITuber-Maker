@@ -9,6 +9,10 @@ type LiveSpeech = {
   text: string;
   audioBase64: string;
   contentType: string;
+  sourceComment?: {
+    authorName: string;
+    message: string;
+  };
   createdAt: number;
 };
 
@@ -40,6 +44,17 @@ const readSpeech = async () => {
   }
 };
 
+const sanitizeSourceComment = (value: unknown) => {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Partial<NonNullable<LiveSpeech["sourceComment"]>>;
+  if (typeof input.authorName !== "string" || typeof input.message !== "string") return undefined;
+  if (!input.authorName.trim() || !input.message.trim()) return undefined;
+  return {
+    authorName: input.authorName.trim(),
+    message: input.message.trim(),
+  };
+};
+
 export async function GET() {
   const speech = await readSpeech();
   return NextResponse.json({ speech }, { headers: { "Cache-Control": "no-store" } });
@@ -59,6 +74,7 @@ export async function POST(request: Request) {
     text: typeof input?.text === "string" ? input.text : "",
     audioBase64: typeof input?.audioBase64 === "string" ? input.audioBase64 : "",
     contentType: typeof input?.contentType === "string" && input.contentType ? input.contentType : "audio/wav",
+    sourceComment: sanitizeSourceComment(input?.sourceComment),
     createdAt: Date.now(),
   };
 

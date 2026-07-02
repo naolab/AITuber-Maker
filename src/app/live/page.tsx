@@ -50,6 +50,12 @@ type LiveSpeechMessage = {
   emotion: Emotion;
   text: string;
   audioBuffer: ArrayBuffer;
+  sourceComment?: LiveSpeechSourceComment;
+};
+
+type LiveSpeechSourceComment = {
+  authorName: string;
+  message: string;
 };
 
 type StoredLiveSpeech = {
@@ -58,6 +64,7 @@ type StoredLiveSpeech = {
   text: string;
   audioBase64: string;
   contentType: string;
+  sourceComment?: LiveSpeechSourceComment;
   createdAt: number;
 };
 
@@ -69,6 +76,7 @@ type PendingSpeech = {
   emotion: Emotion;
   text: string;
   audioBuffer: ArrayBuffer;
+  sourceComment?: LiveSpeechSourceComment;
 };
 
 type ServerLiveAsset = {
@@ -268,6 +276,7 @@ export default function LiveOutputPage() {
   const [activeEmotion, setActiveEmotion] = useState<Emotion>("normal");
   const [mouthShape, setMouthShape] = useState("closed");
   const [lastReply, setLastReply] = useState("");
+  const [activeSourceComment, setActiveSourceComment] = useState<LiveSpeechSourceComment | null>(null);
   const [pendingSpeech, setPendingSpeech] = useState<PendingSpeech | null>(null);
   const [bgType, setBgType] = useState<"color" | "image">("color");
   const [bgColor, setBgColor] = useState("#ffffff");
@@ -304,6 +313,7 @@ export default function LiveOutputPage() {
   const youtubeLiveChatIdRef = useRef("");
   const youtubeSourceKeyRef = useRef("");
   const lastSpeechIdRef = useRef("");
+  const overlayHideTimerRef = useRef(0);
 
   useEffect(() => {
     assetsRef.current = assets;
@@ -334,6 +344,19 @@ export default function LiveOutputPage() {
     activeVideoIndexRef.current = nextIndex;
     setActiveVideoIndex(nextIndex);
   };
+
+  const showSpeechOverlay = useCallback((text: string, sourceComment?: LiveSpeechSourceComment) => {
+    setLastReply(text);
+    setActiveSourceComment(sourceComment ?? null);
+    if (overlayHideTimerRef.current) {
+      window.clearTimeout(overlayHideTimerRef.current);
+    }
+    overlayHideTimerRef.current = window.setTimeout(() => {
+      setLastReply("");
+      setActiveSourceComment(null);
+      overlayHideTimerRef.current = 0;
+    }, 8000);
+  }, []);
 
   useEffect(() => {
     mouthShapeRef.current = mouthShape;
@@ -534,6 +557,7 @@ export default function LiveOutputPage() {
       window.clearTimeout(loadTimer);
       window.clearInterval(settingsPoll);
       window.removeEventListener("storage", handleStorage);
+      if (overlayHideTimerRef.current) window.clearTimeout(overlayHideTimerRef.current);
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [loadAssets, loadSettings]);
@@ -634,7 +658,7 @@ export default function LiveOutputPage() {
         activeEmotionRef.current = nextEmotion;
       }
 
-      setLastReply(pending.text);
+      showSpeechOverlay(pending.text, pending.sourceComment);
       await playAudioAndSyncMouth(pending.audioBuffer);
       setPendingSpeech(null);
       pendingSpeechRef.current = null;
@@ -660,7 +684,7 @@ export default function LiveOutputPage() {
 
     currentVideo.currentTime = 0;
     void currentVideo.play();
-  }, [loadEmotionIntoVideo, playAudioAndSyncMouth]);
+  }, [loadEmotionIntoVideo, playAudioAndSyncMouth, showSpeechOverlay]);
 
   useEffect(() => {
     if (!("BroadcastChannel" in window)) {
@@ -677,6 +701,7 @@ export default function LiveOutputPage() {
         emotion: message.emotion,
         text: message.text,
         audioBuffer: message.audioBuffer,
+        sourceComment: message.sourceComment,
       });
     };
 
@@ -698,6 +723,7 @@ export default function LiveOutputPage() {
             emotion: speech.emotion,
             text: speech.text,
             audioBuffer: base64ToArrayBuffer(speech.audioBase64),
+            sourceComment: speech.sourceComment,
           });
         }
       } catch (error) {
@@ -930,9 +956,20 @@ export default function LiveOutputPage() {
         </div>
       )}
 
-      {lastReply && (
-        <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 w-[min(840px,calc(100vw-48px))] -translate-x-1/2 rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
-          {lastReply}
+      {(lastReply || activeSourceComment) && (
+        <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 grid w-[min(860px,calc(100vw-48px))] -translate-x-1/2 gap-2">
+          {activeSourceComment && (
+            <div className="justify-self-start rounded-md border border-white/20 bg-slate-950/60 px-4 py-2 text-left text-sm shadow-lg backdrop-blur-sm">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-teal-200">Replying to</div>
+              <div className="mt-0.5 font-bold text-white">{activeSourceComment.authorName}</div>
+              <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-white/85">{activeSourceComment.message}</div>
+            </div>
+          )}
+          {lastReply && (
+            <div className="rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
+              {lastReply}
+            </div>
+          )}
         </div>
       )}
     </main>

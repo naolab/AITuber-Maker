@@ -53,6 +53,9 @@ type ChatCache = Record<
   string,
   {
     updatedAt: number;
+    lastFetchedAt?: number;
+    nextPageToken?: string;
+    pollingIntervalMillis?: number;
     messages: NormalizedYouTubeMessage[];
   }
 >;
@@ -98,7 +101,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    if (videoId) {
+    if (videoId && !liveChatId) {
       const videoUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
       videoUrl.searchParams.set("part", "liveStreamingDetails");
       videoUrl.searchParams.set("id", videoId);
@@ -120,17 +123,55 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "liveChatIdを特定できませんでした" }, { status: 404 });
     }
 
+    const cache = await readChatCache();
+    const cachedEntry = cache[liveChatId];
+    const cachedMessages = cachedEntry?.messages ?? [];
+    const pollingIntervalMillis = cachedEntry?.pollingIntervalMillis ?? 5000;
+    const nextAllowedFetchAt = (cachedEntry?.lastFetchedAt ?? 0) + Math.max(pollingIntervalMillis, 5000);
+    if (cachedEntry && Date.now() < nextAllowedFetchAt) {
+      return NextResponse.json({
+        liveChatId,
+        nextPageToken: cachedEntry.nextPageToken ?? "",
+        pollingIntervalMillis,
+        fetchedCount: 0,
+        messages: cachedMessages,
+        cached: true,
+      });
+    }
+
     const chatUrl = new URL("https://www.googleapis.com/youtube/v3/liveChat/messages");
     chatUrl.searchParams.set("part", "snippet,authorDetails");
     chatUrl.searchParams.set("liveChatId", liveChatId);
     chatUrl.searchParams.set("key", apiKey);
     chatUrl.searchParams.set("maxResults", "200");
     chatUrl.searchParams.set("profileImageSize", "48");
-    if (pageToken) chatUrl.searchParams.set("pageToken", pageToken);
+    const nextPageToken = pageToken || cachedEntry?.nextPageToken || "";
+    if (nextPageToken) chatUrl.searchParams.set("pageToken", nextPageToken);
 
     const chatRes = await fetch(chatUrl, { cache: "no-store" });
     const chatData = (await chatRes.json()) as YouTubeLiveChatResponse;
     if (!chatRes.ok) {
+      if (cachedMessages.length > 0) {
+        cache[liveChatId] = {
+          ...cachedEntry,
+          updatedAt: Date.now(),
+          lastFetchedAt: Date.now(),
+          nextPageToken: cachedEntry?.nextPageToken ?? "",
+          pollingIntervalMillis: Math.max(cachedEntry?.pollingIntervalMillis ?? 30000, 30000),
+          messages: cachedMessages,
+        };
+        await writeChatCache(cache);
+        return NextResponse.json({
+          liveChatId,
+          nextPageToken: cachedEntry?.nextPageToken ?? "",
+          pollingIntervalMillis: cache[liveChatId].pollingIntervalMillis,
+          fetchedCount: 0,
+          messages: cachedMessages,
+          cached: true,
+          stale: true,
+          error: getYouTubeError(chatData, "ライブチャットの取得に失敗しました"),
+        });
+      }
       return NextResponse.json({ error: getYouTubeError(chatData, "ライブチャットの取得に失敗しました") }, { status: chatRes.status });
     }
 
@@ -147,12 +188,13 @@ export async function GET(request: NextRequest) {
         isSponsor: Boolean(item.authorDetails?.isChatSponsor),
       })) ?? [];
 
-    const cache = await readChatCache();
-    const cachedMessages = cache[liveChatId]?.messages ?? [];
     const messages = mergeMessages(cachedMessages, fetchedMessages);
     if (fetchedMessages.length > 0 || messages.length > 0) {
       cache[liveChatId] = {
         updatedAt: Date.now(),
+        lastFetchedAt: Date.now(),
+        nextPageToken: chatData.nextPageToken ?? "",
+        pollingIntervalMillis: chatData.pollingIntervalMillis ?? 5000,
         messages,
       };
       await writeChatCache(cache);
