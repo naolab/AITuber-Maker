@@ -49,6 +49,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("Aivis synthesis route error:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    const message = error instanceof Error ? error.message : "Internal Server Error";
+    return NextResponse.json({ error: `Aivis Speechに接続できませんでした: ${message}` }, { status: 500 });
   }
 }

@@ -252,6 +252,8 @@ export default function Home() {
   const [isChatSending, setIsChatSending] = useState(false);
   const [lastReply, setLastReply] = useState("");
   const [lastUserMessage, setLastUserMessage] = useState("");
+  const [isLocalSpeechPlaybackEnabled, setIsLocalSpeechPlaybackEnabled] = useState(true);
+  const [isLocalCharacterPreviewEnabled, setIsLocalCharacterPreviewEnabled] = useState(true);
   const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
   const [youtubeApiKey, setYoutubeApiKey] = useState("");
   const [youtubeVideoId, setYoutubeVideoId] = useState("");
@@ -259,8 +261,10 @@ export default function Home() {
   const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
   const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
   const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
+  const [selectedYoutubeMessageId, setSelectedYoutubeMessageId] = useState("");
   const youtubeNextPageTokenRef = useRef("");
   const youtubeMessageIdsRef = useRef<Set<string>>(new Set());
+  const selectedYoutubeMessage = youtubeMessages.find((message) => message.id === selectedYoutubeMessageId) ?? null;
 
   const [emotionAssets, setEmotionAssets] = useState<Record<Emotion, EmotionAsset>>({
     normal: { videoUrl: "", track: null, mouthSprites: [] },
@@ -441,6 +445,8 @@ export default function Home() {
       const savedYoutubeVideoId = localStorage.getItem("youtube_video_id") || "";
       const savedYoutubeLiveChatId = localStorage.getItem("youtube_live_chat_id") || "";
       const savedYoutubeChatEnabled = localStorage.getItem("youtube_chat_enabled") === "true";
+      const savedLocalSpeechPlayback = localStorage.getItem("local_speech_playback_enabled");
+      const savedLocalCharacterPreview = localStorage.getItem("local_character_preview_enabled");
       const liveSettings = await fetch("/api/live-settings", { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null) as LiveSettingsPatch | null;
@@ -463,6 +469,8 @@ export default function Home() {
       setYoutubeVideoId(nextYoutubeVideoId);
       setYoutubeLiveChatId(nextYoutubeLiveChatId);
       setIsYoutubeChatEnabled(Boolean(nextYoutubeChatEnabled));
+      setIsLocalSpeechPlaybackEnabled(savedLocalSpeechPlayback !== "false");
+      setIsLocalCharacterPreviewEnabled(savedLocalCharacterPreview !== "false");
 
       if (url) {
         void fetchSpeakers(url);
@@ -544,7 +552,12 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (mode === "runtime" && emotionAssets.normal?.videoUrl && runtimeVideoRef0.current) {
+    if (mode !== "runtime" || !isLocalCharacterPreviewEnabled) {
+      pauseRuntimeVideos();
+      return;
+    }
+
+    if (emotionAssets.normal?.videoUrl && runtimeVideoRef0.current) {
       if (!videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
         videoAsset0Ref.current = {
           videoUrl: emotionAssets.normal.videoUrl,
@@ -556,7 +569,7 @@ export default function Home() {
         void runtimeVideoRef0.current.play();
       }
     }
-  }, [mode, emotionAssets]);
+  }, [mode, emotionAssets, isLocalCharacterPreviewEnabled]);
 
   const handleOpenaiKeyChange = (key: string) => {
     setOpenaiApiKey(key);
@@ -632,6 +645,30 @@ export default function Home() {
     }
   };
 
+  const handleLocalSpeechPlaybackChange = (enabled: boolean) => {
+    setIsLocalSpeechPlaybackEnabled(enabled);
+    localStorage.setItem("local_speech_playback_enabled", String(enabled));
+    if (!enabled) {
+      setPendingSpeech(null);
+      setActiveMouthShape("closed");
+    }
+  };
+
+  const pauseRuntimeVideos = () => {
+    runtimeVideoRef0.current?.pause();
+    runtimeVideoRef1.current?.pause();
+  };
+
+  const handleLocalCharacterPreviewChange = (enabled: boolean) => {
+    setIsLocalCharacterPreviewEnabled(enabled);
+    localStorage.setItem("local_character_preview_enabled", String(enabled));
+    if (!enabled) {
+      pauseRuntimeVideos();
+      setPendingSpeech(null);
+      setActiveMouthShape("closed");
+    }
+  };
+
   const fetchYoutubeLiveChat = useCallback(async () => {
     if (!youtubeApiKey || (!youtubeVideoId && !youtubeLiveChatId)) {
       setYoutubeChatStatus("YouTube APIキーと動画IDまたはliveChatIdが必要");
@@ -699,9 +736,25 @@ export default function Home() {
     };
   }, [mode, isYoutubeChatEnabled, fetchYoutubeLiveChat]);
 
-  const sendChatMessage = async () => {
-    if (!chatInput.trim() || !openaiApiKey || isChatSending) return;
-    setLastUserMessage(chatInput);
+  useEffect(() => {
+    if (!selectedYoutubeMessageId) return;
+    if (!youtubeMessages.some((message) => message.id === selectedYoutubeMessageId)) {
+      setSelectedYoutubeMessageId("");
+    }
+  }, [selectedYoutubeMessageId, youtubeMessages]);
+
+  const sendMessageToCharacter = async ({
+    llmMessage,
+    displayMessage,
+    onSuccess,
+  }: {
+    llmMessage: string;
+    displayMessage?: string;
+    onSuccess?: () => void;
+  }) => {
+    const trimmedMessage = llmMessage.trim();
+    if (!trimmedMessage || !openaiApiKey || isChatSending) return;
+    setLastUserMessage((displayMessage || trimmedMessage).trim());
     setIsChatSending(true);
 
     try {
@@ -733,7 +786,7 @@ JSONフォーマット例:
 - "驚き"
 - "悲しい"`,
             },
-            { role: "user", content: chatInput },
+            { role: "user", content: trimmedMessage },
           ],
         }),
       });
@@ -767,6 +820,10 @@ JSONフォーマット例:
         console.error("Failed to parse OpenAI JSON response:", err);
         cleanText = replyJson;
       }
+      cleanText = cleanText.trim();
+      if (!cleanText) {
+        throw new Error("LLMの返答本文が空でした");
+      }
 
       // 2. Aivis Speech synthesis
       const synthRes = await fetch("/api/aivis/synthesis", {
@@ -780,18 +837,32 @@ JSONフォーマット例:
       });
 
       if (!synthRes.ok) {
-        throw new Error("Speech synthesis failed");
+        let errMsg = synthRes.statusText;
+        try {
+          const errData = await synthRes.json();
+          if (errData.error) errMsg = errData.error;
+        } catch {
+          const errText = await synthRes.text().catch(() => "");
+          if (errText) errMsg = errText;
+        }
+        throw new Error(`音声合成に失敗しました: ${errMsg}`);
       }
 
       const audioBuffer = await synthRes.arrayBuffer();
       const liveAudioBuffer = audioBuffer.slice(0);
 
-      // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
-      setPendingSpeech({
-        emotion,
-        text: cleanText,
-        audioBuffer,
-      });
+      if (isLocalSpeechPlaybackEnabled && isLocalCharacterPreviewEnabled) {
+        // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
+        setPendingSpeech({
+          emotion,
+          text: cleanText,
+          audioBuffer,
+        });
+      } else {
+        setLastReply(cleanText);
+        setCurrentEmotion(emotion);
+        setActiveMouthShape("closed");
+      }
 
       if (typeof window !== "undefined" && "BroadcastChannel" in window) {
         const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
@@ -804,13 +875,30 @@ JSONフォーマット例:
         channel.close();
       }
 
-      setChatInput("");
+      onSuccess?.();
     } catch (err) {
       console.error("Chat & LipSync error:", err);
       alert(err instanceof Error ? err.message : "送信に失敗しました");
     } finally {
       setIsChatSending(false);
     }
+  };
+
+  const sendChatMessage = async () => {
+    await sendMessageToCharacter({
+      llmMessage: chatInput,
+      onSuccess: () => setChatInput(""),
+    });
+  };
+
+  const replyToYoutubeMessage = async (message: YouTubeChatMessage) => {
+    await sendMessageToCharacter({
+      llmMessage: `YouTubeライブのコメントに、AITuberとして自然に返答してください。
+
+投稿者: ${message.authorName}
+コメント: ${message.message}`,
+      displayMessage: `${message.authorName}: ${message.message}`,
+    });
   };
 
   const isSpeakingRef = useRef<boolean>(false);
@@ -1078,7 +1166,7 @@ JSONフォーマット例:
   };
 
   useEffect(() => {
-    if (mode !== "runtime") {
+    if (mode !== "runtime" || !isLocalCharacterPreviewEnabled) {
       if (runtimeLoopRef.current) {
         cancelAnimationFrame(runtimeLoopRef.current);
         runtimeLoopRef.current = 0;
@@ -1100,7 +1188,7 @@ JSONフォーマット例:
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, activeMouthShape, mouthSprites, emotionAssets]);
+  }, [mode, activeMouthShape, mouthSprites, emotionAssets, isLocalCharacterPreviewEnabled]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2488,7 +2576,7 @@ JSONフォーマット例:
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
           >
-            {mouthlessUrl && (
+            {mouthlessUrl && isLocalCharacterPreviewEnabled && (
               <div
                 style={{
                   transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
@@ -2534,14 +2622,20 @@ JSONフォーマット例:
             )}
 
             {isYoutubeChatEnabled && (
-              <div className="pointer-events-none absolute right-6 top-24 z-40 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] flex-col justify-end gap-2 overflow-hidden">
+              <div className="absolute right-6 top-24 z-40 flex max-h-[58vh] w-[min(380px,calc(100vw-48px))] flex-col justify-end gap-2 overflow-hidden">
                 <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
                   YouTube Chat · {youtubeChatStatus}
                 </div>
                 {youtubeMessages.map((message) => (
-                  <div
+                  <button
                     key={message.id}
-                    className="flex gap-2 rounded-2xl border border-white/20 bg-white/92 px-3 py-2 text-sm text-slate-900 shadow-lg backdrop-blur-sm"
+                    type="button"
+                    onClick={() => setSelectedYoutubeMessageId(message.id)}
+                    className={`flex w-full gap-2 rounded-2xl border px-3 py-2 text-left text-sm text-slate-900 shadow-lg backdrop-blur-sm transition ${
+                      selectedYoutubeMessageId === message.id
+                        ? "border-teal-400 bg-teal-50/95 ring-2 ring-teal-300"
+                        : "border-white/20 bg-white/92 hover:border-teal-300 hover:bg-white"
+                    }`}
                   >
                     {message.authorImageUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -2564,8 +2658,35 @@ JSONフォーマット例:
                       </div>
                       <div className="break-words leading-relaxed">{message.message}</div>
                     </div>
-                  </div>
+                  </button>
                 ))}
+                {selectedYoutubeMessage && (
+                  <div className="rounded-2xl border border-teal-200 bg-white/95 p-3 text-sm text-slate-900 shadow-xl backdrop-blur-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-bold uppercase tracking-wide text-teal-700">選択中コメント</div>
+                        <div className="mt-1 truncate text-xs font-bold text-slate-700">{selectedYoutubeMessage.authorName}</div>
+                        <div className="mt-1 line-clamp-3 break-words leading-relaxed">{selectedYoutubeMessage.message}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedYoutubeMessageId("")}
+                        className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-100"
+                      >
+                        解除
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void replyToYoutubeMessage(selectedYoutubeMessage)}
+                      disabled={!openaiApiKey || isChatSending}
+                      className="mt-3 flex w-full items-center justify-center gap-2 rounded-full bg-teal-600 px-4 py-2 text-sm font-bold text-white shadow-md transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      <Send className="size-4" />
+                      {isChatSending ? "返答生成中..." : "このコメントに返答"}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2795,6 +2916,36 @@ JSONフォーマット例:
                   <div>
                     <label className="text-sm font-semibold text-slate-800">OBS専用画面</label>
                     <p className="mt-1 text-xs text-slate-500">OBSにはこの専用画面だけを映します。設定画面や操作中のUIは配信に出ません。</p>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div>
+                      <label className="text-sm font-semibold text-slate-800">管理画面のキャラプレビューを表示する</label>
+                      <p className="mt-1 text-xs text-slate-500">OFFにすると、管理画面側の動画再生と口パク描画を止めます。OBS専用画面には影響しません。</p>
+                    </div>
+                    <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-teal-600"
+                        checked={isLocalCharacterPreviewEnabled}
+                        onChange={(event) => handleLocalCharacterPreviewChange(event.target.checked)}
+                      />
+                      表示する
+                    </label>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div>
+                      <label className="text-sm font-semibold text-slate-800">管理画面でも発話を再生する</label>
+                      <p className="mt-1 text-xs text-slate-500">OFFにすると、管理画面側の音声再生と口パクを止めて、OBS専用画面だけで発話します。</p>
+                    </div>
+                    <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-teal-600"
+                        checked={isLocalSpeechPlaybackEnabled}
+                        onChange={(event) => handleLocalSpeechPlaybackChange(event.target.checked)}
+                      />
+                      再生する
+                    </label>
                   </div>
                   <a
                     href="/live"
