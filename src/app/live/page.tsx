@@ -132,6 +132,7 @@ const EMOTIONS: Emotion[] = ["normal", "happy", "angry", "surprised", "sad"];
 const MOUTH_SPRITE_NAMES = ["closed", "half", "open", "e", "u"];
 const CHARACTER_LAYOUT_KEY = "live_character_layout";
 const CHAT_LAYOUT_KEY = "live_chat_layout";
+const LIVE_CHAT_VISIBLE_COUNT = 10;
 const DEFAULT_CHARACTER_LAYOUT: OverlayLayout = { x: 0, y: 0, scale: 1 };
 const DEFAULT_CHAT_LAYOUT: OverlayLayout = { x: 0, y: 0, scale: 1 };
 
@@ -152,6 +153,18 @@ const isReadingSourceComment = (message: YouTubeChatMessage, sourceComment: Live
   if (sourceComment.id) return message.id === sourceComment.id;
   return message.authorName === sourceComment.authorName && message.message === sourceComment.message;
 };
+
+const createPinnedSourceMessage = (sourceComment: LiveSpeechSourceComment): YouTubeChatMessage => ({
+  id: sourceComment.id || `source-comment-${sourceComment.authorName}-${sourceComment.message}`,
+  authorName: sourceComment.authorName,
+  authorImageUrl: "",
+  message: sourceComment.message,
+  publishedAt: "",
+  type: "textMessageEvent",
+  isOwner: false,
+  isModerator: false,
+  isSponsor: false,
+});
 
 const isImportableQuad = (value: unknown): value is Quad =>
   Array.isArray(value) &&
@@ -338,9 +351,15 @@ export default function LiveOutputPage() {
     const asset = assetsRef.current[emotion];
     if (!asset?.videoUrl) return false;
     if (video.src !== asset.videoUrl) {
-      video.src = asset.videoUrl;
-      video.load();
-      await waitForEvent(video, "canplay");
+      try {
+        video.src = asset.videoUrl;
+        video.load();
+        await waitForEvent(video, "canplay");
+      } catch (error) {
+        console.error(error);
+        setStatus(`${emotion}素材の動画を読み込めませんでした`);
+        return false;
+      }
     }
     return true;
   }, []);
@@ -681,8 +700,13 @@ export default function LiveOutputPage() {
       setPendingSpeech(null);
       pendingSpeechRef.current = null;
 
-      void nextVideo.play();
-      switchActiveVideo();
+      if (loaded) {
+        void nextVideo.play();
+        switchActiveVideo();
+      } else {
+        currentVideo.currentTime = 0;
+        void currentVideo.play();
+      }
       return;
     }
 
@@ -696,6 +720,9 @@ export default function LiveOutputPage() {
         setStatus("配信待機中");
         void nextVideo.play();
         switchActiveVideo();
+      } else {
+        currentVideo.currentTime = 0;
+        void currentVideo.play();
       }
       return;
     }
@@ -836,11 +863,11 @@ export default function LiveOutputPage() {
     }
     youtubeNextPageTokenRef.current = data.nextPageToken || "";
     const incoming = data.messages?.filter((message) => message.message.trim()) ?? [];
-    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${incoming.length}件表示`);
+    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${Math.min(incoming.length, LIVE_CHAT_VISIBLE_COUNT)}件表示`);
 
     if (incoming.length) {
       youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
-      setYoutubeMessages(incoming.slice(-10));
+      setYoutubeMessages(incoming.slice(-LIVE_CHAT_VISIBLE_COUNT));
     }
 
     return Math.max(data.pollingIntervalMillis || 5000, 2000);
@@ -872,6 +899,13 @@ export default function LiveOutputPage() {
   }, [fetchYoutubeLiveChat, isYoutubeChatEnabled]);
 
   const activeAsset = assets[activeEmotion];
+
+  const shouldPinSourceComment =
+    Boolean(activeSourceComment) && !youtubeMessages.some((message) => isReadingSourceComment(message, activeSourceComment));
+  const displayedYoutubeMessages =
+    activeSourceComment && shouldPinSourceComment
+      ? [...youtubeMessages.slice(-(LIVE_CHAT_VISIBLE_COUNT - 1)), createPinnedSourceMessage(activeSourceComment)]
+      : youtubeMessages;
 
   return (
     <main
@@ -947,7 +981,7 @@ export default function LiveOutputPage() {
           <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
             YouTube Chat · {youtubeChatStatus}
           </div>
-          {youtubeMessages.map((message) => {
+          {displayedYoutubeMessages.map((message) => {
             const matchesSourceComment = isReadingSourceComment(message, activeSourceComment);
             const hasReadingComment = isSourceCommentHighlightActive && activeSourceComment;
             const isReading = Boolean(hasReadingComment && matchesSourceComment);

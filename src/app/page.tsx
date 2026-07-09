@@ -202,6 +202,7 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 ];
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
+const LIVE_CHAT_VISIBLE_COUNT = 10;
 
 const createLiveSpeechSourceComment = (message: YouTubeChatMessage): LiveSpeechSourceComment => ({
   id: message.id,
@@ -811,10 +812,10 @@ export default function Home() {
     const incoming = (data.messages ?? []).filter((message) => message.message.trim());
     if (incoming.length) {
       youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
-      setYoutubeMessages(incoming.slice(-10));
+      setYoutubeMessages(incoming.slice(-LIVE_CHAT_VISIBLE_COUNT));
     }
 
-    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${incoming.length}件表示`);
+    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${Math.min(incoming.length, LIVE_CHAT_VISIBLE_COUNT)}件表示`);
     return Math.max(1000, data.pollingIntervalMillis || 5000);
   }, [youtubeApiKey, youtubeVideoId, youtubeLiveChatId]);
 
