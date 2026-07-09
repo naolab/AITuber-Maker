@@ -118,6 +118,7 @@ const isImportableQuad = (value: unknown): value is Quad =>
 type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
 type TtsType = "aivis" | "aivis-cloud" | "voicevox" | "custom";
 type LiveSpeechSourceComment = {
+  id?: string;
   authorName: string;
   message: string;
 };
@@ -201,6 +202,12 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 ];
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
+
+const createLiveSpeechSourceComment = (message: YouTubeChatMessage): LiveSpeechSourceComment => ({
+  id: message.id,
+  authorName: message.authorName,
+  message: message.message,
+});
 
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   const bytes = new Uint8Array(buffer);
@@ -1013,12 +1020,7 @@ JSONフォーマット例:
   };
 
   const sendChatMessage = async () => {
-    const sourceComment = selectedYoutubeMessage
-      ? {
-          authorName: selectedYoutubeMessage.authorName,
-          message: selectedYoutubeMessage.message,
-        }
-      : undefined;
+    const sourceComment = selectedYoutubeMessage ? createLiveSpeechSourceComment(selectedYoutubeMessage) : undefined;
 
     await sendMessageToCharacter({
       llmMessage: chatInput,
@@ -1028,10 +1030,7 @@ JSONフォーマット例:
   };
 
   const replyToYoutubeMessage = async (message: YouTubeChatMessage) => {
-    const sourceComment = {
-      authorName: message.authorName,
-      message: message.message,
-    };
+    const sourceComment = createLiveSpeechSourceComment(message);
     activeReplySourceCommentRef.current = sourceComment;
     await sendMessageToCharacter({
       llmMessage: `YouTubeライブのコメントに、AITuberとして自然に返答してください。

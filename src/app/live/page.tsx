@@ -54,6 +54,7 @@ type LiveSpeechMessage = {
 };
 
 type LiveSpeechSourceComment = {
+  id?: string;
   authorName: string;
   message: string;
 };
@@ -145,6 +146,12 @@ const base64ToArrayBuffer = (base64: string) => {
 
 const isEmotion = (value: unknown): value is Emotion =>
   value === "normal" || value === "happy" || value === "angry" || value === "surprised" || value === "sad";
+
+const isReadingSourceComment = (message: YouTubeChatMessage, sourceComment: LiveSpeechSourceComment | null) => {
+  if (!sourceComment) return false;
+  if (sourceComment.id) return message.id === sourceComment.id;
+  return message.authorName === sourceComment.authorName && message.message === sourceComment.message;
+};
 
 const isImportableQuad = (value: unknown): value is Quad =>
   Array.isArray(value) &&
@@ -277,6 +284,7 @@ export default function LiveOutputPage() {
   const [mouthShape, setMouthShape] = useState("closed");
   const [lastReply, setLastReply] = useState("");
   const [activeSourceComment, setActiveSourceComment] = useState<LiveSpeechSourceComment | null>(null);
+  const [isSourceCommentHighlightActive, setIsSourceCommentHighlightActive] = useState(false);
   const [pendingSpeech, setPendingSpeech] = useState<PendingSpeech | null>(null);
   const [bgType, setBgType] = useState<"color" | "image">("color");
   const [bgColor, setBgColor] = useState("#ffffff");
@@ -314,6 +322,7 @@ export default function LiveOutputPage() {
   const youtubeSourceKeyRef = useRef("");
   const lastSpeechIdRef = useRef("");
   const overlayHideTimerRef = useRef(0);
+  const sourceCommentSettleTimerRef = useRef(0);
 
   useEffect(() => {
     assetsRef.current = assets;
@@ -348,12 +357,20 @@ export default function LiveOutputPage() {
   const showSpeechOverlay = useCallback((text: string, sourceComment?: LiveSpeechSourceComment) => {
     setLastReply(text);
     setActiveSourceComment(sourceComment ?? null);
+    setIsSourceCommentHighlightActive(Boolean(sourceComment));
     if (overlayHideTimerRef.current) {
       window.clearTimeout(overlayHideTimerRef.current);
     }
+    if (sourceCommentSettleTimerRef.current) {
+      window.clearTimeout(sourceCommentSettleTimerRef.current);
+    }
     overlayHideTimerRef.current = window.setTimeout(() => {
       setLastReply("");
-      setActiveSourceComment(null);
+      setIsSourceCommentHighlightActive(false);
+      sourceCommentSettleTimerRef.current = window.setTimeout(() => {
+        setActiveSourceComment(null);
+        sourceCommentSettleTimerRef.current = 0;
+      }, 900);
       overlayHideTimerRef.current = 0;
     }, 8000);
   }, []);
@@ -558,6 +575,7 @@ export default function LiveOutputPage() {
       window.clearInterval(settingsPoll);
       window.removeEventListener("storage", handleStorage);
       if (overlayHideTimerRef.current) window.clearTimeout(overlayHideTimerRef.current);
+      if (sourceCommentSettleTimerRef.current) window.clearTimeout(sourceCommentSettleTimerRef.current);
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [loadAssets, loadSettings]);
@@ -913,7 +931,7 @@ export default function LiveOutputPage() {
 
       {isYoutubeChatEnabled && (
         <div
-          className="absolute right-6 top-6 z-20 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] select-none flex-col justify-end gap-2 overflow-hidden"
+          className="absolute right-6 top-6 z-20 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] select-none flex-col justify-end gap-2 overflow-visible"
           style={{
             transform: `translate(${chatLayout.x}px, ${chatLayout.y}px) scale(${chatLayout.scale})`,
             transformOrigin: "top right",
@@ -929,47 +947,69 @@ export default function LiveOutputPage() {
           <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
             YouTube Chat · {youtubeChatStatus}
           </div>
-          {youtubeMessages.map((message) => (
-            <div
-              key={message.id}
-              className="flex gap-2 rounded-2xl border border-white/20 bg-white/92 px-3 py-2 text-sm text-slate-900 shadow-lg backdrop-blur-sm"
-            >
-              {message.authorImageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={message.authorImageUrl} alt="" className="mt-0.5 size-7 flex-none rounded-full bg-slate-200" />
-              ) : (
-                <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
-                  {message.authorName.slice(0, 1)}
+          {youtubeMessages.map((message) => {
+            const matchesSourceComment = isReadingSourceComment(message, activeSourceComment);
+            const hasReadingComment = isSourceCommentHighlightActive && activeSourceComment;
+            const isReading = Boolean(hasReadingComment && matchesSourceComment);
+            const isReadingSettling = Boolean(activeSourceComment && matchesSourceComment && !isSourceCommentHighlightActive);
+            const readingTranslateClass = chatLayout.x < 0 ? "translate-x-16" : "-translate-x-16";
+
+            return (
+              <div
+                key={message.id}
+                className={`relative flex gap-2 rounded-2xl border px-3 py-2 text-sm text-slate-900 shadow-lg backdrop-blur-sm transition-all duration-[850ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                  isReading
+                    ? `z-30 origin-center ${readingTranslateClass} scale-110 border-teal-200 bg-white shadow-[0_20px_55px_rgba(8,145,178,0.34)] ring-4 ring-teal-300/45 reading-comment-card`
+                    : hasReadingComment
+                      ? "border-white/15 bg-white/70 opacity-60"
+                      : "border-white/20 bg-white/92"
+                }`}
+              >
+                {(isReading || isReadingSettling) && (
+                  <div
+                    className={`absolute -top-3 right-4 rounded-full border border-teal-200 bg-teal-500 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wide text-white shadow-lg transition-opacity duration-500 ${
+                      isReading ? "opacity-100" : "opacity-0"
+                    }`}
+                  >
+                    Reading
+                  </div>
+                )}
+                {message.authorImageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={message.authorImageUrl}
+                    alt=""
+                    className={`mt-0.5 size-7 flex-none rounded-full bg-slate-200 transition-transform duration-500 ${isReading ? "scale-110 ring-2 ring-teal-300" : ""}`}
+                  />
+                ) : (
+                  <div
+                    className={`mt-0.5 grid size-7 flex-none place-items-center rounded-full text-xs font-bold text-white transition-transform duration-500 ${
+                      isReading ? "scale-110 bg-teal-500 ring-2 ring-teal-300" : "bg-teal-600"
+                    }`}
+                  >
+                    {message.authorName.slice(0, 1)}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className={`truncate text-xs font-bold ${isReading ? "text-teal-800" : "text-slate-700"}`}>{message.authorName}</span>
+                    {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
+                    {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
+                    {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
+                  </div>
+                  <div className="break-words leading-relaxed">{message.message}</div>
                 </div>
-              )}
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-1">
-                  <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
-                  {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
-                  {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
-                  {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
-                </div>
-                <div className="break-words leading-relaxed">{message.message}</div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {(lastReply || activeSourceComment) && (
-        <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 grid w-[min(860px,calc(100vw-48px))] -translate-x-1/2 gap-2">
-          {activeSourceComment && (
-            <div className="justify-self-start rounded-md border border-white/20 bg-slate-950/60 px-4 py-2 text-left text-sm shadow-lg backdrop-blur-sm">
-              <div className="text-[11px] font-bold uppercase tracking-wide text-teal-200">Replying to</div>
-              <div className="mt-0.5 font-bold text-white">{activeSourceComment.authorName}</div>
-              <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-white/85">{activeSourceComment.message}</div>
-            </div>
-          )}
-          {lastReply && (
-            <div className="rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
-              {lastReply}
-            </div>
-          )}
+      {lastReply && (
+        <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 w-[min(860px,calc(100vw-48px))] -translate-x-1/2">
+          <div className="rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
+            {lastReply}
+          </div>
         </div>
       )}
     </main>

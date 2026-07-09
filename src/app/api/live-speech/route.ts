@@ -10,6 +10,7 @@ type LiveSpeech = {
   audioBase64: string;
   contentType: string;
   sourceComment?: {
+    id?: string;
     authorName: string;
     message: string;
   };
@@ -50,6 +51,7 @@ const sanitizeSourceComment = (value: unknown) => {
   if (typeof input.authorName !== "string" || typeof input.message !== "string") return undefined;
   if (!input.authorName.trim() || !input.message.trim()) return undefined;
   return {
+    ...(typeof input.id === "string" && input.id.trim() ? { id: input.id.trim() } : {}),
     authorName: input.authorName.trim(),
     message: input.message.trim(),
   };
