@@ -1013,8 +1013,16 @@ JSONフォーマット例:
   };
 
   const sendChatMessage = async () => {
+    const sourceComment = selectedYoutubeMessage
+      ? {
+          authorName: selectedYoutubeMessage.authorName,
+          message: selectedYoutubeMessage.message,
+        }
+      : undefined;
+
     await sendMessageToCharacter({
       llmMessage: chatInput,
+      sourceComment,
       onSuccess: () => setChatInput(""),
     });
   };
