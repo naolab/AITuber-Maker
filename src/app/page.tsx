@@ -811,7 +811,7 @@ export default function Home() {
     const incoming = (data.messages ?? []).filter((message) => message.message.trim());
     if (incoming.length) {
       youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
-      setYoutubeMessages(incoming.slice(-12));
+      setYoutubeMessages(incoming.slice(-10));
     }
 
     setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${incoming.length}件表示`);

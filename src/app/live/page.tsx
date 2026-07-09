@@ -840,7 +840,7 @@ export default function LiveOutputPage() {
 
     if (incoming.length) {
       youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
-      setYoutubeMessages(incoming.slice(-12));
+      setYoutubeMessages(incoming.slice(-10));
     }
 
     return Math.max(data.pollingIntervalMillis || 5000, 2000);
