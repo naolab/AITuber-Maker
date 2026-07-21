@@ -197,6 +197,22 @@ type LiveSettingsPatch = Partial<{
   youtubeChatEnabled: boolean;
 }>;
 
+type PersonaSettings = {
+  name: string;
+  firstPerson: string;
+  personality: string;
+  speakingStyle: string;
+  responsePolicy: string;
+};
+
+const defaultPersona: PersonaSettings = {
+  name: "AITuber",
+  firstPerson: "私",
+  personality: "親しみやすく、誠実で、落ち着いている",
+  speakingStyle: "丁寧で自然な日本語。必要以上に大げさにしない。",
+  responsePolicy: "不明なことは推測で断定せず、正直に伝える。",
+};
+
 const EMOTIONS: { key: Emotion; label: string }[] = [
   { key: "normal", label: "通常" },
   { key: "happy", label: "嬉しい" },
@@ -207,6 +223,8 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
 const MAX_YOUTUBE_MESSAGE_HISTORY = 500;
+
+const personaPrompt = (persona: PersonaSettings) => `\nキャラクター設定:\n- 名前: ${persona.name || defaultPersona.name}\n- 一人称: ${persona.firstPerson || defaultPersona.firstPerson}\n- 性格: ${persona.personality || defaultPersona.personality}\n- 話し方: ${persona.speakingStyle || defaultPersona.speakingStyle}\n- 回答方針: ${persona.responsePolicy || defaultPersona.responsePolicy}\nこの設定を守って返答してください。`;
 
 const createLiveSpeechSourceComment = (message: YouTubeChatMessage): LiveSpeechSourceComment => ({
   id: message.id,
@@ -297,6 +315,7 @@ export default function Home() {
 
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
+  const [persona, setPersona] = useState<PersonaSettings>(defaultPersona);
   const [availableModels, setAvailableModels] = useState<string[]>([
     "gpt-4o-mini",
     "gpt-4o",
@@ -504,6 +523,7 @@ export default function Home() {
     window.requestAnimationFrame(async () => {
       const key = localStorage.getItem("openai_api_key") || "";
       const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
+      const savedPersona = JSON.parse(localStorage.getItem("character_persona") || "null") as Partial<PersonaSettings> | null;
       const tts = (localStorage.getItem("tts_type") as TtsType) || "aivis";
       const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
       const speaker = localStorage.getItem("aivis_speaker") || "2";
@@ -536,6 +556,7 @@ export default function Home() {
 
       setOpenaiApiKey(key);
       setOpenaiModel(model);
+      setPersona({ ...defaultPersona, ...savedPersona });
       setTtsType(tts);
       setAivisUrl(url);
       setSelectedSpeaker(speaker);
@@ -674,6 +695,14 @@ export default function Home() {
   const handleOpenaiModelChange = (model: string) => {
     setOpenaiModel(model);
     localStorage.setItem("openai_model", model);
+  };
+
+  const handlePersonaChange = (patch: Partial<PersonaSettings>) => {
+    setPersona((current) => {
+      const next = { ...current, ...patch };
+      localStorage.setItem("character_persona", JSON.stringify(next));
+      return next;
+    });
   };
 
   const handleTtsTypeChange = (type: TtsType) => {
@@ -928,6 +957,7 @@ JSONフォーマット例:
 - "怒り"
 - "驚き"
 - "悲しい"
+${personaPrompt(persona)}
 
 ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。コメントへの回答はこの資料に基づき、根拠がなければ推測で断定せず「現時点では確認できていません」と答えてください。\n\n${presentationContext}` : ""}`,
             },
@@ -2953,6 +2983,20 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="grid gap-4 rounded-md border border-slate-200 bg-slate-50 p-4">
+                  <div>
+                    <label className="text-sm font-semibold text-slate-800">キャラクターペルソナ</label>
+                    <p className="mt-1 text-xs text-slate-500">通常チャットとYouTubeコメント応答に常に反映されます。</p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="grid gap-1.5 text-sm font-semibold">名前<input value={persona.name} onChange={(event) => handlePersonaChange({ name: event.target.value })} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" /></label>
+                    <label className="grid gap-1.5 text-sm font-semibold">一人称<input value={persona.firstPerson} onChange={(event) => handlePersonaChange({ firstPerson: event.target.value })} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" /></label>
+                  </div>
+                  <label className="grid gap-1.5 text-sm font-semibold">性格<textarea value={persona.personality} onChange={(event) => handlePersonaChange({ personality: event.target.value })} className="min-h-20 resize-y rounded-md border border-slate-200 bg-white p-3 font-normal" /></label>
+                  <label className="grid gap-1.5 text-sm font-semibold">話し方<textarea value={persona.speakingStyle} onChange={(event) => handlePersonaChange({ speakingStyle: event.target.value })} className="min-h-20 resize-y rounded-md border border-slate-200 bg-white p-3 font-normal" /></label>
+                  <label className="grid gap-1.5 text-sm font-semibold">回答方針<textarea value={persona.responsePolicy} onChange={(event) => handlePersonaChange({ responsePolicy: event.target.value })} className="min-h-20 resize-y rounded-md border border-slate-200 bg-white p-3 font-normal" /></label>
                 </div>
 
                 {/* Voice Synthesis Engine Selection */}

@@ -141,10 +141,12 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [title, setTitle] = useState("");
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [replacementPdfFile, setReplacementPdfFile] = useState<File | null>(null);
   const [status, setStatus] = useState("PDFを選択して発表プロジェクトを作成してください");
   const [isImporting, setIsImporting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isDeleteConfirming, setIsDeleteConfirming] = useState(false);
   const autoAdvanceTimerRef = useRef(0);
   const queuedPresentationSpeechRef = useRef<QueuedPresentationSpeech | null>(null);
   const autoAdvanceEnabledRef = useRef(false);
@@ -235,6 +237,62 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     } finally {
       setIsImporting(false);
     }
+  };
+
+  const replaceProjectPdf = async () => {
+    if (!project || !replacementPdfFile || isImporting) return;
+    setIsImporting(true);
+    setStatus("更新用PDFを読み込み中...");
+    try {
+      const pdfjs = await import("pdfjs-dist");
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+      const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await replacementPdfFile.arrayBuffer()) });
+      const document = await loadingTask.promise;
+      if (document.numPages > 100) throw new Error("PDFは100ページ以内にしてください");
+      const slideFiles: File[] = [];
+      for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+        setStatus(`更新PDF変換中 ${pageNumber}/${document.numPages}ページ`);
+        const page = await document.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = window.document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        await page.render({ canvas, viewport, background: "#ffffff" }).promise;
+        slideFiles.push(await canvasToPng(canvas, `${String(pageNumber).padStart(3, "0")}.png`));
+        page.cleanup();
+      }
+      await loadingTask.destroy();
+      const formData = new FormData();
+      formData.set("id", project.id);
+      formData.set("sourcePdf", replacementPdfFile);
+      slideFiles.forEach((slide) => formData.append("slides", slide));
+      const response = await fetch("/api/presentations", { method: "PATCH", body: formData });
+      const data = (await response.json()) as ProjectResponse;
+      if (!response.ok || !data.project) throw new Error(data.error || "PDFを更新できませんでした");
+      setProject(data.project);
+      setCurrentSlideIndex((index) => Math.min(index, data.project!.slides.length - 1));
+      setReplacementPdfFile(null);
+      setStatus(`PDFを更新しました。${data.project.slides.length}ページです（同じページ番号の原稿・ノートは保持）。`);
+      await loadProjects();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "PDFの更新に失敗しました");
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const deleteProject = async () => {
+    if (!project) return;
+    const response = await fetch(`/api/presentations?id=${encodeURIComponent(project.id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(data.error || "プロジェクトを削除できませんでした");
+    }
+    setProject(null);
+    setCurrentSlideIndex(0);
+    setIsDeleteConfirming(false);
+    setStatus("プロジェクトを削除しました");
+    await loadProjects();
   };
 
   const updateCurrentSlide = (patch: Partial<PresentationProject["slides"][number]>) => {
@@ -477,6 +535,17 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
             ))}
           </div>
 
+          {project && <div className="mt-4 grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+            <p className="text-xs font-semibold text-slate-700">選択中PDFを更新</p>
+            <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-white px-3 py-2 text-xs font-semibold hover:bg-slate-50">
+              <FileUp className="size-4" />
+              {replacementPdfFile?.name || "更新用PDFを選択"}
+              <input className="sr-only" type="file" accept="application/pdf,.pdf" onChange={(event) => setReplacementPdfFile(event.target.files?.[0] ?? null)} />
+            </label>
+            <button type="button" disabled={!replacementPdfFile || isImporting} onClick={() => void replaceProjectPdf()} className="rounded-md border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-bold text-teal-800 disabled:opacity-50">PDFを更新</button>
+            <button type="button" onClick={() => setIsDeleteConfirming(true)} className="rounded-md border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50">このプロジェクトを削除</button>
+          </div>}
+
           <div className="my-5 h-px bg-slate-200" />
           <h2 className="font-bold">PDFから作成</h2>
           <div className="mt-3 grid gap-3">
@@ -578,6 +647,19 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
           ) : <p className="mt-3 text-sm text-slate-500">プロジェクトを選択すると編集できます。</p>}
         </aside>
       </div>
+      {isDeleteConfirming && project && (
+        <div className="fixed inset-0 z-[100] grid place-items-center bg-slate-950/45 p-5" role="dialog" aria-modal="true" aria-labelledby="delete-project-title">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
+            <p className="text-sm font-bold text-rose-700">プロジェクトを削除</p>
+            <h2 id="delete-project-title" className="mt-2 text-lg font-bold text-slate-900">「{project.title}」を削除しますか？</h2>
+            <p className="mt-3 text-sm leading-relaxed text-slate-600">PDF、スライド画像、原稿、ノート、発表知識、想定Q&Aがすべて削除されます。この操作は元に戻せません。</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={() => setIsDeleteConfirming(false)} className="rounded-md border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">キャンセル</button>
+              <button type="button" onClick={() => void deleteProject().catch((error) => setStatus(error instanceof Error ? error.message : "削除できませんでした"))} className="rounded-md bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">削除する</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

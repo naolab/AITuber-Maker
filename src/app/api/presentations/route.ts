@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -169,4 +169,51 @@ export async function PUT(request: Request) {
   await writeFile(path.join(PRESENTATION_ROOT, updated.id, "knowledge.md"), updated.knowledge);
   await writeFile(path.join(PRESENTATION_ROOT, updated.id, "qa.md"), updated.qa);
   return NextResponse.json({ project: updated }, { headers: { "Cache-Control": "no-store" } });
+}
+
+export async function PATCH(request: Request) {
+  const formData = await request.formData();
+  const id = typeof formData.get("id") === "string" ? String(formData.get("id")) : "";
+  const sourcePdf = formData.get("sourcePdf");
+  const slides = formData.getAll("slides").filter((value): value is File => value instanceof File);
+  if (!isSafeProjectId(id)) return NextResponse.json({ error: "発表プロジェクトIDが不正です" }, { status: 400 });
+  if (!(sourcePdf instanceof File) || sourcePdf.type !== "application/pdf") return NextResponse.json({ error: "PDFファイルが必要です" }, { status: 400 });
+  if (slides.length === 0 || slides.length > MAX_SLIDES || slides.some((slide) => slide.type !== "image/png" || slide.size > MAX_SLIDE_BYTES)) {
+    return NextResponse.json({ error: "変換済みスライドの形式またはサイズが不正です" }, { status: 400 });
+  }
+  const current = await readProject(id);
+  if (!current) return NextResponse.json({ error: "発表プロジェクトが見つかりません" }, { status: 404 });
+  const projectDir = path.join(PRESENTATION_ROOT, id);
+  const slideDir = path.join(projectDir, "slides");
+  await mkdir(slideDir, { recursive: true });
+  await writeFile(path.join(projectDir, "source.pdf"), Buffer.from(await sourcePdf.arrayBuffer()));
+  const updated: PresentationProject = {
+    ...current,
+    sourcePdfName: sourcePdf.name,
+    updatedAt: new Date().toISOString(),
+    slides: await Promise.all(slides.map(async (file, index) => {
+      const fileName = `${String(index + 1).padStart(3, "0")}.png`;
+      await writeFile(path.join(slideDir, fileName), Buffer.from(await file.arrayBuffer()));
+      const previous = current.slides[index];
+      return previous ? { ...previous, page: index + 1, imageUrl: `/presentation-projects/${id}/slides/${fileName}` } : {
+        id: `slide-${index + 1}`,
+        page: index + 1,
+        imageUrl: `/presentation-projects/${id}/slides/${fileName}`,
+        script: "",
+        notes: "",
+        expectedDurationSeconds: 30,
+      };
+    })),
+  };
+  await writeFile(path.join(projectDir, "presentation.json"), `${JSON.stringify(updated, null, 2)}\n`);
+  return NextResponse.json({ project: updated }, { headers: { "Cache-Control": "no-store" } });
+}
+
+export async function DELETE(request: NextRequest) {
+  const id = request.nextUrl.searchParams.get("id")?.trim() || "";
+  if (!isSafeProjectId(id)) return NextResponse.json({ error: "発表プロジェクトIDが不正です" }, { status: 400 });
+  const projectDir = path.join(PRESENTATION_ROOT, id);
+  if (!(await readProject(id))) return NextResponse.json({ error: "発表プロジェクトが見つかりません" }, { status: 404 });
+  await rm(projectDir, { recursive: true, force: true });
+  return NextResponse.json({ deletedId: id });
 }
