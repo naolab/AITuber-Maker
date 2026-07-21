@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable react-hooks/immutability -- This legacy client page intentionally coordinates mutable video elements and refs. */
+
 import {
   Activity,
   Bot,
@@ -11,6 +13,7 @@ import {
   Minus,
   Play,
   Plus,
+  Presentation,
   Radio,
   Send,
   Settings,
@@ -21,6 +24,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
+import PresentationConsole from "@/app/presentation/presentation-console";
 import type { GeneratedSprite, Mode, MouthFrame, MouthlessCleanPlate, MouthlessMask, MouthSpriteName, MouthTrack, Quad, SpeedMode, WorkerMessage } from "@/lib/materials";
 import {
   analyzeMouthPatchFeatures,
@@ -848,13 +852,6 @@ export default function Home() {
     };
   }, [mode, isYoutubeChatEnabled, fetchYoutubeLiveChat]);
 
-  useEffect(() => {
-    if (!selectedYoutubeMessageId) return;
-    if (!youtubeMessages.some((message) => message.id === selectedYoutubeMessageId)) {
-      setSelectedYoutubeMessageId("");
-    }
-  }, [selectedYoutubeMessageId, youtubeMessages]);
-
   const sendMessageToCharacter = async ({
     llmMessage,
     displayMessage,
@@ -974,7 +971,7 @@ JSONフォーマット例:
       const audioContentType = synthRes.headers.get("content-type") || "audio/wav";
       const audioBuffer = await synthRes.arrayBuffer();
       const liveAudioBuffer = audioBuffer.slice(0);
-      const speechId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const speechId = crypto.randomUUID();
 
       if (isLocalSpeechPlaybackEnabled && isLocalCharacterPreviewEnabled) {
         // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
@@ -2437,6 +2434,7 @@ JSONフォーマット例:
                 <nav className="flex rounded-md border border-slate-200 bg-white p-1 shadow-sm transition-all duration-300">
                   <ModeButton active={mode === "materials"} icon={<Wand2 />} label="素材生成" onClick={() => setMode("materials")} />
                   <ModeButton active={mode === "runtime"} icon={<Radio />} label="配信モード" onClick={() => setMode("runtime")} />
+                  <ModeButton active={mode === "presentation"} icon={<Presentation />} label="発表" onClick={() => setMode("presentation")} />
                   <ModeButton active={mode === "settings"} icon={<Settings />} label="設定" onClick={() => setMode("settings")} />
                 </nav>
                 <button
@@ -2878,6 +2876,12 @@ JSONフォーマット例:
               </div>
             </div>
           </div>
+        )}
+
+        {mode === "presentation" && (
+          <section className="mx-auto w-full max-w-[1600px] flex-1 px-5 pt-24 pb-4">
+            <PresentationConsole embedded />
+          </section>
         )}
 
         {mode === "settings" && (

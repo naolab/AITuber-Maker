@@ -28,12 +28,15 @@ new-app-requirements.md
 .aituber-live-settings.json
 .aituber-live-chat-cache.json
 .aituber-live-speech.json
+.aituber-presentation-live.json
 
 # local model artifacts
 public/models/*
 !public/models/.gitkeep
 public/live-assets/*
 !public/live-assets/.gitkeep
+public/presentation-projects/*
+!public/presentation-projects/.gitkeep
 
 # debug
 npm-debug.log*

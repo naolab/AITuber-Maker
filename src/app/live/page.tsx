@@ -2,6 +2,8 @@
 
 import { PointerEvent, WheelEvent, useCallback, useEffect, useRef, useState } from "react";
 
+import type { PresentationLiveState } from "@/lib/presentation";
+import { defaultPresentationLiveState } from "@/lib/presentation";
 import type { GeneratedSprite, MouthTrack, Quad } from "@/lib/materials";
 import { drawWarpedPatch, waitForEvent } from "@/lib/materials";
 
@@ -51,6 +53,12 @@ type LiveSpeechMessage = {
   text: string;
   audioBuffer: ArrayBuffer;
   sourceComment?: LiveSpeechSourceComment;
+  presentationState?: PresentationLiveState;
+};
+
+type LiveSpeechStartedMessage = {
+  type: "speech-started";
+  id: string;
 };
 
 type LiveSpeechSourceComment = {
@@ -73,11 +81,17 @@ type LiveSpeechResponse = {
   speech?: StoredLiveSpeech | null;
 };
 
+type PresentationLiveResponse = {
+  state?: PresentationLiveState;
+};
+
 type PendingSpeech = {
+  id?: string;
   emotion: Emotion;
   text: string;
   audioBuffer: ArrayBuffer;
   sourceComment?: LiveSpeechSourceComment;
+  presentationState?: PresentationLiveState;
 };
 
 type ServerLiveAsset = {
@@ -311,6 +325,7 @@ export default function LiveOutputPage() {
   const [characterLayout, setCharacterLayout] = useState<OverlayLayout>(DEFAULT_CHARACTER_LAYOUT);
   const [chatLayout, setChatLayout] = useState<OverlayLayout>(DEFAULT_CHAT_LAYOUT);
   const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
+  const [presentationState, setPresentationState] = useState<PresentationLiveState>(defaultPresentationLiveState);
 
   const videoRef0 = useRef<HTMLVideoElement | null>(null);
   const videoRef1 = useRef<HTMLVideoElement | null>(null);
@@ -610,7 +625,7 @@ export default function LiveOutputPage() {
     void video.play();
   }, [assets.normal.videoUrl]);
 
-  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer) => {
+  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer, speechId?: string, presentationState?: PresentationLiveState) => {
     const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
     if (!AudioContextClass) {
       setStatus("このブラウザはWeb Audio APIに対応していません");
@@ -667,7 +682,21 @@ export default function LiveOutputPage() {
 
     isSpeakingRef.current = true;
     setStatus("発話中");
+    if (presentationState) {
+      setPresentationState(presentationState);
+      void fetch("/api/presentation-live", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(presentationState),
+      });
+    }
     source.start(0);
+    if (speechId && "BroadcastChannel" in window) {
+      const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
+      const message: LiveSpeechStartedMessage = { type: "speech-started", id: speechId };
+      channel.postMessage(message);
+      channel.close();
+    }
     sync();
   }, []);
 
@@ -696,7 +725,7 @@ export default function LiveOutputPage() {
       }
 
       showSpeechOverlay(pending.text, pending.sourceComment);
-      await playAudioAndSyncMouth(pending.audioBuffer);
+      await playAudioAndSyncMouth(pending.audioBuffer, pending.id, pending.presentationState);
       setPendingSpeech(null);
       pendingSpeechRef.current = null;
 
@@ -743,10 +772,12 @@ export default function LiveOutputPage() {
       if (message.id) lastSpeechIdRef.current = message.id;
 
       queueLiveSpeech({
+        id: message.id,
         emotion: message.emotion,
         text: message.text,
         audioBuffer: message.audioBuffer,
         sourceComment: message.sourceComment,
+        presentationState: message.presentationState,
       });
     };
 
@@ -765,6 +796,7 @@ export default function LiveOutputPage() {
         if (!disposed && speech && speech.id !== lastSpeechIdRef.current && isEmotion(speech.emotion)) {
           lastSpeechIdRef.current = speech.id;
           queueLiveSpeech({
+            id: speech.id,
             emotion: speech.emotion,
             text: speech.text,
             audioBuffer: base64ToArrayBuffer(speech.audioBase64),
@@ -784,6 +816,31 @@ export default function LiveOutputPage() {
       if (timer) window.clearTimeout(timer);
     };
   }, [queueLiveSpeech]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/presentation-live", { cache: "no-store" });
+        const data = (await response.json()) as PresentationLiveResponse;
+        if (!disposed && data.state) {
+          setPresentationState((current) => data.state && data.state.updatedAt >= current.updatedAt ? data.state : current);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 700);
+      }
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const tick = () => {
@@ -899,6 +956,7 @@ export default function LiveOutputPage() {
   }, [fetchYoutubeLiveChat, isYoutubeChatEnabled]);
 
   const activeAsset = assets[activeEmotion];
+  const isPresentationMode = presentationState.enabled;
 
   const shouldPinSourceComment =
     Boolean(activeSourceComment) && !youtubeMessages.some((message) => isReadingSourceComment(message, activeSourceComment));
@@ -916,12 +974,23 @@ export default function LiveOutputPage() {
           : { backgroundColor: bgColor }
       }
     >
+      {isPresentationMode && presentationState.slideImageUrl && (
+        <div className="absolute inset-0 z-0 grid place-items-center bg-slate-950 p-[3vh]">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={presentationState.slideImageUrl} alt={`スライド ${presentationState.slideIndex + 1}`} className="max-h-full max-w-full object-contain" />
+          <div className="absolute left-6 top-5 rounded-full bg-slate-950/70 px-4 py-1.5 text-sm font-bold shadow-lg backdrop-blur-sm">
+            {presentationState.projectTitle} · {presentationState.slideIndex + 1}/{presentationState.slideCount}
+          </div>
+        </div>
+      )}
       {activeAsset.videoUrl ? (
         <div
-          className="absolute left-1/2 top-1/2 z-10 select-none overflow-hidden"
+          className="absolute z-10 select-none overflow-hidden"
           style={{
-            height: "min(82vh, 56.25vw)",
-            width: "min(92vw, 145.78vh)",
+            height: isPresentationMode ? "min(38vh, 26vw)" : "min(82vh, 56.25vw)",
+            width: isPresentationMode ? "min(46vw, 67.5vh)" : "min(92vw, 145.78vh)",
+            left: isPresentationMode ? "17%" : "50%",
+            top: isPresentationMode ? "75%" : "50%",
             transform: `translate(-50%, -50%) translate(${characterLayout.x}px, ${characterLayout.y}px) scale(${characterLayout.scale})`,
             transformOrigin: "center center",
             cursor: "grab",
@@ -957,11 +1026,11 @@ export default function LiveOutputPage() {
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
           </div>
         </div>
-      ) : (
+      ) : !isPresentationMode ? (
         <div className="absolute inset-0 grid place-items-center bg-slate-950 text-sm font-semibold text-white">
           {status}
         </div>
-      )}
+      ) : null}
 
       {isYoutubeChatEnabled && (
         <div
@@ -1039,10 +1108,10 @@ export default function LiveOutputPage() {
         </div>
       )}
 
-      {lastReply && (
+      {(isPresentationMode ? presentationState.caption : lastReply) && (
         <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 w-[min(860px,calc(100vw-48px))] -translate-x-1/2">
           <div className="rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
-            {lastReply}
+            {isPresentationMode ? presentationState.caption : lastReply}
           </div>
         </div>
       )}

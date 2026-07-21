@@ -1,4 +1,4 @@
-export type Mode = "materials" | "runtime" | "settings";
+export type Mode = "materials" | "runtime" | "presentation" | "settings";
 export type SpeedMode = "quality" | "balanced" | "fast" | "turbo";
 
 export type Quad = [[number, number], [number, number], [number, number], [number, number]];
