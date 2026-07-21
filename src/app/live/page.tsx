@@ -114,6 +114,10 @@ type LiveSettingsResponse = Partial<{
   youtubeVideoId: string;
   youtubeLiveChatId: string;
   youtubeChatEnabled: boolean;
+  captionsEnabled: boolean;
+  youtubeChatWidth: number;
+  youtubeChatStatusVisible: boolean;
+  youtubeChatVisibleCount: number;
   characterLayout: OverlayLayout;
   chatLayout: OverlayLayout;
 }>;
@@ -320,6 +324,10 @@ export default function LiveOutputPage() {
   const [youtubeVideoId, setYoutubeVideoId] = useState("");
   const [youtubeLiveChatId, setYoutubeLiveChatId] = useState("");
   const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [youtubeChatWidth, setYoutubeChatWidth] = useState(360);
+  const [youtubeChatStatusVisible, setYoutubeChatStatusVisible] = useState(true);
+  const [youtubeChatVisibleCount, setYoutubeChatVisibleCount] = useState(10);
   const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
   const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
   const [characterLayout, setCharacterLayout] = useState<OverlayLayout>(DEFAULT_CHARACTER_LAYOUT);
@@ -443,6 +451,10 @@ export default function LiveOutputPage() {
     setYoutubeVideoId(nextYoutubeVideoId);
     setYoutubeLiveChatId(nextYoutubeLiveChatId);
     setIsYoutubeChatEnabled(settings?.youtubeChatEnabled ?? localStorage.getItem("youtube_chat_enabled") === "true");
+    setCaptionsEnabled(settings?.captionsEnabled ?? localStorage.getItem("captions_enabled") !== "false");
+    setYoutubeChatWidth(settings?.youtubeChatWidth ?? Number(localStorage.getItem("youtube_chat_width") || 360));
+    setYoutubeChatStatusVisible(settings?.youtubeChatStatusVisible ?? localStorage.getItem("youtube_chat_status_visible") !== "false");
+    setYoutubeChatVisibleCount(settings?.youtubeChatVisibleCount ?? Number(localStorage.getItem("youtube_chat_visible_count") || 10));
 
     if (youtubeSourceKeyRef.current !== nextYoutubeSourceKey) {
       youtubeSourceKeyRef.current = nextYoutubeSourceKey;
@@ -677,6 +689,15 @@ export default function LiveOutputPage() {
       cancelAnimationFrame(frame);
       setMouthShape("closed");
       void audioCtx.close();
+      if (presentationState) {
+        const clearedState = { ...presentationState, caption: "", updatedAt: Date.now() };
+        setPresentationState(clearedState);
+        void fetch("/api/presentation-live", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(clearedState),
+        });
+      }
       isSpeakingRef.current = false;
     };
 
@@ -962,8 +983,8 @@ export default function LiveOutputPage() {
     Boolean(activeSourceComment) && !youtubeMessages.some((message) => isReadingSourceComment(message, activeSourceComment));
   const displayedYoutubeMessages =
     activeSourceComment && shouldPinSourceComment
-      ? [...youtubeMessages.slice(-(LIVE_CHAT_VISIBLE_COUNT - 1)), createPinnedSourceMessage(activeSourceComment)]
-      : youtubeMessages;
+      ? [...(youtubeChatVisibleCount > 1 ? youtubeMessages.slice(-(youtubeChatVisibleCount - 1)) : []), createPinnedSourceMessage(activeSourceComment)]
+      : youtubeMessages.slice(-youtubeChatVisibleCount);
 
   return (
     <main
@@ -1036,6 +1057,7 @@ export default function LiveOutputPage() {
         <div
           className="absolute right-6 top-6 z-20 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] select-none flex-col justify-end gap-2 overflow-visible"
           style={{
+            width: `min(${youtubeChatWidth}px, calc(100vw - 48px))`,
             transform: `translate(${chatLayout.x}px, ${chatLayout.y}px) scale(${chatLayout.scale})`,
             transformOrigin: "top right",
             cursor: "grab",
@@ -1047,9 +1069,9 @@ export default function LiveOutputPage() {
           onPointerCancel={stopDrag}
           onWheel={(event) => handleLayoutWheel("chat", event)}
         >
-          <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
+          {youtubeChatStatusVisible && <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
             YouTube Chat · {youtubeChatStatus}
-          </div>
+          </div>}
           {displayedYoutubeMessages.map((message) => {
             const matchesSourceComment = isReadingSourceComment(message, activeSourceComment);
             const hasReadingComment = isSourceCommentHighlightActive && activeSourceComment;
@@ -1108,7 +1130,7 @@ export default function LiveOutputPage() {
         </div>
       )}
 
-      {(isPresentationMode ? presentationState.caption : lastReply) && (
+      {captionsEnabled && (isPresentationMode ? presentationState.caption : lastReply) && (
         <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 w-[min(860px,calc(100vw-48px))] -translate-x-1/2">
           <div className="rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
             {isPresentationMode ? presentationState.caption : lastReply}

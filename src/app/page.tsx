@@ -195,6 +195,10 @@ type LiveSettingsPatch = Partial<{
   youtubeVideoId: string;
   youtubeLiveChatId: string;
   youtubeChatEnabled: boolean;
+  captionsEnabled: boolean;
+  youtubeChatWidth: number;
+  youtubeChatStatusVisible: boolean;
+  youtubeChatVisibleCount: number;
 }>;
 
 type PersonaSettings = {
@@ -345,6 +349,10 @@ export default function Home() {
   const [youtubeVideoId, setYoutubeVideoId] = useState("");
   const [youtubeLiveChatId, setYoutubeLiveChatId] = useState("");
   const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [youtubeChatWidth, setYoutubeChatWidth] = useState(360);
+  const [youtubeChatStatusVisible, setYoutubeChatStatusVisible] = useState(true);
+  const [youtubeChatVisibleCount, setYoutubeChatVisibleCount] = useState(10);
   const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
   const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
   const [selectedYoutubeMessageId, setSelectedYoutubeMessageId] = useState("");
@@ -553,6 +561,10 @@ export default function Home() {
       const nextYoutubeVideoId = liveSettings?.youtubeVideoId || savedYoutubeVideoId;
       const nextYoutubeLiveChatId = liveSettings?.youtubeLiveChatId || savedYoutubeLiveChatId;
       const nextYoutubeChatEnabled = liveSettings?.youtubeChatEnabled ?? savedYoutubeChatEnabled;
+      const nextCaptionsEnabled = liveSettings?.captionsEnabled ?? localStorage.getItem("captions_enabled") !== "false";
+      const nextYoutubeChatWidth = liveSettings?.youtubeChatWidth ?? Number(localStorage.getItem("youtube_chat_width") || 360);
+      const nextYoutubeChatStatusVisible = liveSettings?.youtubeChatStatusVisible ?? localStorage.getItem("youtube_chat_status_visible") !== "false";
+      const nextYoutubeChatVisibleCount = liveSettings?.youtubeChatVisibleCount ?? Number(localStorage.getItem("youtube_chat_visible_count") || 10);
 
       setOpenaiApiKey(key);
       setOpenaiModel(model);
@@ -574,6 +586,10 @@ export default function Home() {
       setYoutubeVideoId(nextYoutubeVideoId);
       setYoutubeLiveChatId(nextYoutubeLiveChatId);
       setIsYoutubeChatEnabled(Boolean(nextYoutubeChatEnabled));
+      setCaptionsEnabled(nextCaptionsEnabled);
+      setYoutubeChatWidth(nextYoutubeChatWidth);
+      setYoutubeChatStatusVisible(nextYoutubeChatStatusVisible);
+      setYoutubeChatVisibleCount(nextYoutubeChatVisibleCount);
       setIsLocalSpeechPlaybackEnabled(savedLocalSpeechPlayback !== "false");
       setIsLocalCharacterPreviewEnabled(savedLocalCharacterPreview !== "false");
 
@@ -778,6 +794,32 @@ export default function Home() {
     setYoutubeApiKey(key);
     localStorage.setItem("youtube_api_key", key);
     void saveLiveSettingsForObs({ youtubeApiKey: key });
+  };
+
+  const handleCaptionsEnabledChange = (enabled: boolean) => {
+    setCaptionsEnabled(enabled);
+    localStorage.setItem("captions_enabled", String(enabled));
+    void saveLiveSettingsForObs({ captionsEnabled: enabled });
+  };
+
+  const handleYoutubeChatWidthChange = (width: number) => {
+    const next = Math.min(640, Math.max(240, width || 360));
+    setYoutubeChatWidth(next);
+    localStorage.setItem("youtube_chat_width", String(next));
+    void saveLiveSettingsForObs({ youtubeChatWidth: next });
+  };
+
+  const handleYoutubeChatStatusVisibleChange = (visible: boolean) => {
+    setYoutubeChatStatusVisible(visible);
+    localStorage.setItem("youtube_chat_status_visible", String(visible));
+    void saveLiveSettingsForObs({ youtubeChatStatusVisible: visible });
+  };
+
+  const handleYoutubeChatVisibleCountChange = (count: number) => {
+    const next = Math.min(30, Math.max(1, count || 10));
+    setYoutubeChatVisibleCount(next);
+    localStorage.setItem("youtube_chat_visible_count", String(next));
+    void saveLiveSettingsForObs({ youtubeChatVisibleCount: next });
   };
 
   const handleYoutubeVideoIdChange = (videoId: string) => {
@@ -2826,10 +2868,10 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
             )}
 
             {isYoutubeChatEnabled && (
-              <div className="absolute right-6 top-24 z-40 flex h-[58vh] w-[min(380px,calc(100vw-48px))] flex-col gap-2">
-                <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
+              <div className="absolute right-6 top-24 z-40 flex h-[58vh] flex-col gap-2" style={{ width: `min(${youtubeChatWidth}px, calc(100vw - 48px))` }}>
+                {youtubeChatStatusVisible && <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
                   YouTube Chat · {youtubeChatStatus}
-                </div>
+                </div>}
                 <div data-youtube-comment-list className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-1">
                   {youtubeMessages.map((message) => (
                     <button
@@ -2909,7 +2951,7 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
               )}
 
               {/* Latest Reply Bubble */}
-              {lastReply && (
+              {captionsEnabled && lastReply && (
                 <div className="self-start rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-[85%] text-sm text-slate-800 transition-all relative">
                   <div className="absolute -top-2.5 left-4 px-2 py-0.5 rounded bg-teal-600 text-[10px] font-bold text-white shadow-sm">
                     {EMOTIONS.find(e => e.key === currentEmotion)?.label || "通常"}
@@ -3213,6 +3255,21 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
                         onChange={(event) => handleYoutubeChatEnabledChange(event.target.checked)}
                       />
                       表示する
+                    </label>
+                  </div>
+
+                  <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 md:grid-cols-2">
+                    <label className="flex items-center justify-between gap-3 text-sm font-semibold text-slate-800">字幕を表示
+                      <input type="checkbox" className="size-4 accent-teal-600" checked={captionsEnabled} onChange={(event) => handleCaptionsEnabledChange(event.target.checked)} />
+                    </label>
+                    <label className="flex items-center justify-between gap-3 text-sm font-semibold text-slate-800">接続状態ラベルを表示
+                      <input type="checkbox" className="size-4 accent-teal-600" checked={youtubeChatStatusVisible} onChange={(event) => handleYoutubeChatStatusVisibleChange(event.target.checked)} />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-semibold text-slate-800 md:col-span-2">コメント欄の横幅（px）
+                      <input type="number" min="240" max="640" step="10" value={youtubeChatWidth} onChange={(event) => handleYoutubeChatWidthChange(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-semibold text-slate-800 md:col-span-2">OBSに表示するコメント数
+                      <input type="number" min="1" max="30" step="1" value={youtubeChatVisibleCount} onChange={(event) => handleYoutubeChatVisibleCountChange(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" />
                     </label>
                   </div>
 

@@ -358,11 +358,12 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     const paragraph = queued.paragraphs[queued.paragraphIndex];
     if (!paragraph) return;
     const id = crypto.randomUUID();
-    queuedPresentationSpeechRef.current = { ...queued, id, durationMs: paragraph.durationMs };
+    const presentationState = { ...queued.presentationState, caption: paragraph.text, updatedAt: Date.now() };
+    queuedPresentationSpeechRef.current = { ...queued, presentationState, id, durationMs: paragraph.durationMs };
     const liveAudioBuffer = paragraph.audioBuffer.slice(0);
     if ("BroadcastChannel" in window) {
       const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
-      channel.postMessage({ type: "speech", id, emotion: paragraph.emotion, text: paragraph.text, audioBuffer: liveAudioBuffer, presentationState: queued.presentationState });
+      channel.postMessage({ type: "speech", id, emotion: paragraph.emotion, text: paragraph.text, audioBuffer: liveAudioBuffer, presentationState });
       channel.close();
     }
     const response = await fetch("/api/live-speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, emotion: paragraph.emotion, text: paragraph.text, audioBase64: arrayBufferToBase64(liveAudioBuffer), contentType: paragraph.contentType }) });
