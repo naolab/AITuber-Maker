@@ -313,6 +313,7 @@ export default function Home() {
   const [aivisCloudStyleName, setAivisCloudStyleName] = useState("");
   const [aivisCloudUserDictionaryUuid, setAivisCloudUserDictionaryUuid] = useState("");
   const [aivisCloudOutputFormat, setAivisCloudOutputFormat] = useState("mp3");
+  const [localSpeakingRate, setLocalSpeakingRate] = useState("1.0");
   const [aivisCloudSpeakingRate, setAivisCloudSpeakingRate] = useState("1.0");
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
@@ -513,6 +514,7 @@ export default function Home() {
       const cloudUserDictionaryUuid = localStorage.getItem("aivis_cloud_user_dictionary_uuid") || "";
       const cloudOutputFormat = localStorage.getItem("aivis_cloud_output_format") || "mp3";
       const cloudSpeakingRate = localStorage.getItem("aivis_cloud_speaking_rate") || "1.0";
+      const savedLocalSpeakingRate = localStorage.getItem("local_speaking_rate") || "1.0";
       const bgType = (localStorage.getItem("runtime_bg_type") as "color" | "image") || "color";
       const bgColor = localStorage.getItem("runtime_bg_color") || "#ffffff";
       const savedYoutubeApiKey = localStorage.getItem("youtube_api_key") || "";
@@ -543,6 +545,7 @@ export default function Home() {
       setAivisCloudStyleName(cloudStyleName);
       setAivisCloudUserDictionaryUuid(cloudUserDictionaryUuid);
       setAivisCloudOutputFormat(cloudOutputFormat);
+      setLocalSpeakingRate(savedLocalSpeakingRate);
       setAivisCloudSpeakingRate(cloudSpeakingRate);
       setRuntimeBgType(nextBgType === "image" ? "color" : nextBgType);
       setRuntimeBgColor(nextBgColor);
@@ -735,6 +738,11 @@ export default function Home() {
   const handleAivisCloudSpeakingRateChange = (speakingRate: string) => {
     setAivisCloudSpeakingRate(speakingRate);
     localStorage.setItem("aivis_cloud_speaking_rate", speakingRate);
+  };
+
+  const handleLocalSpeakingRateChange = (speakingRate: string) => {
+    setLocalSpeakingRate(speakingRate);
+    localStorage.setItem("local_speaking_rate", speakingRate);
   };
 
   const handleYoutubeApiKeyChange = (key: string) => {
@@ -978,6 +986,7 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
           aivisCloudUserDictionaryUuid,
           aivisCloudOutputFormat,
           aivisCloudSpeakingRate,
+          localSpeakingRate,
         }),
       });
 
@@ -3125,6 +3134,22 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
                     )}
                   </select>
                 </div>
+                )}
+
+                {ttsType !== "aivis-cloud" && (
+                  <div className="grid gap-2">
+                    <label className="text-sm font-semibold text-slate-800">話速</label>
+                    <input
+                      type="number"
+                      min="0.5"
+                      max="2"
+                      step="0.1"
+                      value={localSpeakingRate}
+                      onChange={(event) => handleLocalSpeakingRateChange(event.target.value)}
+                      className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                    />
+                    <p className="text-xs text-slate-500">AivisSpeechローカル・VOICEVOX・カスタム接続先に共通で適用します。1.0が標準です。</p>
+                  </div>
                 )}
 
                 {/* YouTube Live Chat */}

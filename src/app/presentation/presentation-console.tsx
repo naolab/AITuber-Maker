@@ -27,6 +27,7 @@ type SpeechSettings = {
   aivisCloudUserDictionaryUuid: string;
   aivisCloudOutputFormat: string;
   aivisCloudSpeakingRate: string;
+  localSpeakingRate: string;
   openaiApiKey: string;
   openaiModel: string;
 };
@@ -78,6 +79,7 @@ const getSpeechSettings = (): SpeechSettings => ({
   aivisCloudUserDictionaryUuid: localStorage.getItem("aivis_cloud_user_dictionary_uuid") || "",
   aivisCloudOutputFormat: localStorage.getItem("aivis_cloud_output_format") || "mp3",
   aivisCloudSpeakingRate: localStorage.getItem("aivis_cloud_speaking_rate") || "1.0",
+  localSpeakingRate: localStorage.getItem("local_speaking_rate") || "1.0",
   openaiApiKey: localStorage.getItem("openai_api_key") || "",
   openaiModel: localStorage.getItem("openai_model") || "gpt-4o-mini",
 });
@@ -345,6 +347,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
           aivisCloudUserDictionaryUuid: speechSettings.aivisCloudUserDictionaryUuid,
           aivisCloudOutputFormat: speechSettings.aivisCloudOutputFormat,
           aivisCloudSpeakingRate: speechSettings.aivisCloudSpeakingRate,
+          localSpeakingRate: speechSettings.localSpeakingRate,
         }),
         });
         if (!synthResponse.ok) {
