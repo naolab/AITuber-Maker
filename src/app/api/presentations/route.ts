@@ -30,8 +30,13 @@ const createProjectId = (title: string) => {
 const readProject = async (projectId: string) => {
   if (!isSafeProjectId(projectId)) return null;
   try {
-    const raw = await readFile(path.join(PRESENTATION_ROOT, projectId, "presentation.json"), "utf8");
-    return JSON.parse(raw) as PresentationProject;
+    const projectDir = path.join(PRESENTATION_ROOT, projectId);
+    const [raw, knowledge, qa] = await Promise.all([
+      readFile(path.join(projectDir, "presentation.json"), "utf8"),
+      readFile(path.join(projectDir, "knowledge.md"), "utf8").catch(() => ""),
+      readFile(path.join(projectDir, "qa.md"), "utf8").catch(() => ""),
+    ]);
+    return { ...(JSON.parse(raw) as PresentationProject), knowledge, qa };
   } catch {
     return null;
   }
@@ -101,6 +106,8 @@ export async function POST(request: Request) {
       questionPolicy: "manual",
     },
     slides: [],
+    knowledge: "# 発表全体の補足知識\n",
+    qa: "# 想定質問と回答\n",
   };
 
   for (let index = 0; index < slides.length; index += 1) {
@@ -116,8 +123,8 @@ export async function POST(request: Request) {
     });
   }
 
-  await writeFile(path.join(projectDir, "knowledge.md"), "# 発表全体の補足知識\n");
-  await writeFile(path.join(projectDir, "qa.md"), "# 想定質問と回答\n");
+  await writeFile(path.join(projectDir, "knowledge.md"), project.knowledge);
+  await writeFile(path.join(projectDir, "qa.md"), project.qa);
   await writeFile(path.join(projectDir, "presentation.json"), `${JSON.stringify(project, null, 2)}\n`);
 
   return NextResponse.json({ project }, { status: 201, headers: { "Cache-Control": "no-store" } });
@@ -154,8 +161,12 @@ export async function PUT(request: Request) {
         Math.max(1, Math.round(Number(project.slides[index]?.expectedDurationSeconds) || 30)),
       ),
     })),
+    knowledge: typeof project.knowledge === "string" ? project.knowledge.slice(0, 100_000) : "",
+    qa: typeof project.qa === "string" ? project.qa.slice(0, 100_000) : "",
   };
 
   await writeFile(path.join(PRESENTATION_ROOT, updated.id, "presentation.json"), `${JSON.stringify(updated, null, 2)}\n`);
+  await writeFile(path.join(PRESENTATION_ROOT, updated.id, "knowledge.md"), updated.knowledge);
+  await writeFile(path.join(PRESENTATION_ROOT, updated.id, "qa.md"), updated.qa);
   return NextResponse.json({ project: updated }, { headers: { "Cache-Control": "no-store" } });
 }

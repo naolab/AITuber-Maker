@@ -883,6 +883,16 @@ export default function Home() {
     setIsChatSending(true);
 
     try {
+      let presentationContext = "";
+      if (speechSourceComment) {
+        const liveStateResponse = await fetch("/api/presentation-live", { cache: "no-store" });
+        const liveState = await liveStateResponse.json().catch(() => ({})) as { state?: { projectId?: string } };
+        if (liveState.state?.projectId) {
+          const contextResponse = await fetch(`/api/presentation-context?id=${encodeURIComponent(liveState.state.projectId)}`, { cache: "no-store" });
+          const contextData = await contextResponse.json().catch(() => ({})) as { context?: string };
+          presentationContext = contextData.context || "";
+        }
+      }
       // 1. OpenAI Chat Completion
       const chatRes = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -909,7 +919,9 @@ JSONフォーマット例:
 - "嬉しい"
 - "怒り"
 - "驚き"
-- "悲しい"`,
+- "悲しい"
+
+${presentationContext ? `以下は現在のゼミ発表の根拠資料です。コメントへの回答はこの資料に基づき、根拠がなければ推測で断定せず「現時点では確認できていません」と答えてください。\n\n${presentationContext}` : ""}`,
             },
             { role: "user", content: trimmedMessage },
           ],

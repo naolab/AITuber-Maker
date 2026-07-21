@@ -21,6 +21,8 @@ export type PresentationProject = {
   updatedAt: string;
   settings: PresentationSettings;
   slides: PresentationSlide[];
+  knowledge: string;
+  qa: string;
 };
 
 export type PresentationProjectSummary = Pick<

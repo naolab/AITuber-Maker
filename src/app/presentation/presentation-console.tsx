@@ -27,9 +27,13 @@ type SpeechSettings = {
   aivisCloudUserDictionaryUuid: string;
   aivisCloudOutputFormat: string;
   aivisCloudSpeakingRate: string;
+  openaiApiKey: string;
+  openaiModel: string;
 };
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
+type Emotion = "normal" | "happy" | "angry" | "surprised" | "sad";
+type PreparedParagraph = { text: string; emotion: Emotion; audioBuffer: ArrayBuffer; contentType: string; durationMs: number };
 
 type QueuedPresentationSpeech = {
   id: string;
@@ -38,6 +42,8 @@ type QueuedPresentationSpeech = {
   durationMs: number;
   project: PresentationProject;
   presentationState: PresentationLiveState;
+  paragraphs: PreparedParagraph[];
+  paragraphIndex: number;
 };
 
 const canvasToPng = (canvas: HTMLCanvasElement, fileName: string) =>
@@ -72,7 +78,40 @@ const getSpeechSettings = (): SpeechSettings => ({
   aivisCloudUserDictionaryUuid: localStorage.getItem("aivis_cloud_user_dictionary_uuid") || "",
   aivisCloudOutputFormat: localStorage.getItem("aivis_cloud_output_format") || "mp3",
   aivisCloudSpeakingRate: localStorage.getItem("aivis_cloud_speaking_rate") || "1.0",
+  openaiApiKey: localStorage.getItem("openai_api_key") || "",
+  openaiModel: localStorage.getItem("openai_model") || "gpt-4o-mini",
 });
+
+const resolvePresentationEmotion = async (script: string, settings: SpeechSettings): Promise<Emotion> => {
+  if (!settings.openaiApiKey) return "normal";
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.openaiApiKey}` },
+      body: JSON.stringify({
+        model: settings.openaiModel,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: "次の発表原稿に最も合う感情を1つ選び、JSONで返してください。emotionの値は「通常」「嬉しい」「怒り」「驚き」「悲しい」のいずれかだけにしてください。ゼミ発表では落ち着いた説明は通常を優先し、明確な強調や驚きがある場合のみ他の感情を選んでください。返答本文は不要です。",
+          },
+          { role: "user", content: script },
+        ],
+      }),
+    });
+    if (!response.ok) return "normal";
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const emotion = JSON.parse(data.choices?.[0]?.message?.content || "{}").emotion;
+    if (emotion === "嬉しい") return "happy";
+    if (emotion === "怒り") return "angry";
+    if (emotion === "驚き") return "surprised";
+    if (emotion === "悲しい") return "sad";
+  } catch {
+    // 感情判定に失敗しても、発表は通常モーションで続行する。
+  }
+  return "normal";
+};
 
 const getAudioDurationMs = async (audioBuffer: ArrayBuffer, fallbackSeconds: number) => {
   const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -87,6 +126,8 @@ const getAudioDurationMs = async (audioBuffer: ArrayBuffer, fallbackSeconds: num
     await context.close();
   }
 };
+
+const splitIntoParagraphs = (script: string) => script.split(/\r?\n\s*\r?\n+/).map((paragraph) => paragraph.trim()).filter(Boolean);
 
 type PresentationConsoleProps = {
   embedded?: boolean;
@@ -253,6 +294,21 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     });
   };
 
+  const queueParagraph = useCallback(async (queued: Omit<QueuedPresentationSpeech, "id" | "durationMs"> & { paragraphIndex: number }) => {
+    const paragraph = queued.paragraphs[queued.paragraphIndex];
+    if (!paragraph) return;
+    const id = crypto.randomUUID();
+    queuedPresentationSpeechRef.current = { ...queued, id, durationMs: paragraph.durationMs };
+    const liveAudioBuffer = paragraph.audioBuffer.slice(0);
+    if ("BroadcastChannel" in window) {
+      const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
+      channel.postMessage({ type: "speech", id, emotion: paragraph.emotion, text: paragraph.text, audioBuffer: liveAudioBuffer, presentationState: queued.presentationState });
+      channel.close();
+    }
+    const response = await fetch("/api/live-speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, emotion: paragraph.emotion, text: paragraph.text, audioBase64: arrayBufferToBase64(liveAudioBuffer), contentType: paragraph.contentType }) });
+    if (!response.ok) throw new Error("OBS出力へ読み上げを送信できませんでした");
+  }, []);
+
   const speakSlide = useCallback(async (slideIndex: number, autoAdvance: boolean) => {
     const activeProject = project;
     const slide = activeProject?.slides[slideIndex];
@@ -269,11 +325,16 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
 
     try {
       const speechSettings = getSpeechSettings();
-      const synthResponse = await fetch("/api/aivis/synthesis", {
+      const texts = splitIntoParagraphs(slide.script);
+      const paragraphs: PreparedParagraph[] = [];
+      for (const [index, text] of texts.entries()) {
+        setStatus(`${slide.page}ページ目・段落 ${index + 1}/${texts.length} を準備中...`);
+        const emotion = await resolvePresentationEmotion(text, speechSettings);
+        const synthResponse = await fetch("/api/aivis/synthesis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: slide.script,
+          text,
           ttsType: speechSettings.ttsType,
           speaker: Number(speechSettings.selectedSpeaker),
           aivisUrl: speechSettings.aivisUrl,
@@ -285,17 +346,20 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
           aivisCloudOutputFormat: speechSettings.aivisCloudOutputFormat,
           aivisCloudSpeakingRate: speechSettings.aivisCloudSpeakingRate,
         }),
-      });
-      if (!synthResponse.ok) {
+        });
+        if (!synthResponse.ok) {
         const detail = await synthResponse.json().catch(() => ({})) as { error?: string };
         throw new Error(detail.error || "音声合成に失敗しました");
+        }
+        const audioBuffer = await synthResponse.arrayBuffer();
+        paragraphs.push({
+          text,
+          emotion,
+          audioBuffer,
+          contentType: synthResponse.headers.get("content-type") || "audio/wav",
+          durationMs: await getAudioDurationMs(audioBuffer, Math.max(1, Math.round(slide.expectedDurationSeconds / texts.length))),
+        });
       }
-
-      const contentType = synthResponse.headers.get("content-type") || "audio/wav";
-      const audioBuffer = await synthResponse.arrayBuffer();
-      const speechId = crypto.randomUUID();
-      const liveAudioBuffer = audioBuffer.slice(0);
-      const durationMs = await getAudioDurationMs(audioBuffer, slide.expectedDurationSeconds);
       const presentationState: PresentationLiveState = {
         enabled: true,
         status: "presenting",
@@ -307,25 +371,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
         caption: slide.script,
         updatedAt: Date.now(),
       };
-      queuedPresentationSpeechRef.current = { id: speechId, slideIndex, autoAdvance, durationMs, project: activeProject, presentationState };
-      if ("BroadcastChannel" in window) {
-        const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
-        channel.postMessage({ type: "speech", id: speechId, emotion: "normal", text: slide.script, audioBuffer: liveAudioBuffer, presentationState });
-        channel.close();
-      }
-
-      const liveResponse = await fetch("/api/live-speech", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: speechId,
-          emotion: "normal",
-          text: slide.script,
-          audioBase64: arrayBufferToBase64(liveAudioBuffer),
-          contentType,
-        }),
-      });
-      if (!liveResponse.ok) throw new Error("OBS出力へ読み上げを送信できませんでした");
+      await queueParagraph({ slideIndex, autoAdvance, project: activeProject, presentationState, paragraphs, paragraphIndex: 0 });
 
       setStatus(`${slide.page}ページ目の読み上げ開始を待っています`);
     } catch (error) {
@@ -334,7 +380,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       await updateLiveState({ status: "paused" }).catch(() => {});
       setStatus(error instanceof Error ? error.message : "読み上げを開始できませんでした");
     }
-  }, [project, updateLiveState]);
+  }, [project, queueParagraph, updateLiveState]);
 
   const stopAutoAdvance = async () => {
     if (autoAdvanceTimerRef.current) window.clearTimeout(autoAdvanceTimerRef.current);
@@ -350,15 +396,21 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     if (!queuedSpeech || queuedSpeech.id !== speechId) return;
 
     queuedPresentationSpeechRef.current = null;
-    const { project: activeProject, slideIndex, autoAdvance, durationMs, presentationState } = queuedSpeech;
+    const { project: activeProject, slideIndex, autoAdvance, durationMs, presentationState, paragraphs, paragraphIndex } = queuedSpeech;
     const slide = activeProject.slides[slideIndex];
     if (!slide) return;
 
     setCurrentSlideIndex(slideIndex);
-    setStatus(`${slide.page}ページ目を読み上げ中`);
+    setStatus(`${slide.page}ページ目・段落 ${paragraphIndex + 1}/${paragraphs.length} を読み上げ中`);
     void updateLiveState(presentationState);
 
     autoAdvanceTimerRef.current = window.setTimeout(() => {
+      if (paragraphIndex + 1 < paragraphs.length) {
+        void queueParagraph({ project: activeProject, slideIndex, autoAdvance, presentationState, paragraphs, paragraphIndex: paragraphIndex + 1 })
+          .then(() => setStatus(`${slide.page}ページ目・段落 ${paragraphIndex + 2}/${paragraphs.length} の読み上げ開始を待っています`))
+          .catch((error) => setStatus(error instanceof Error ? error.message : "次の段落を送信できませんでした"));
+        return;
+      }
       const nextSlideIndex = slideIndex + 1;
       setIsSpeaking(false);
       if (autoAdvance && autoAdvanceEnabledRef.current && nextSlideIndex < activeProject.slides.length) {
@@ -368,7 +420,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       void updateLiveState({ status: nextSlideIndex >= activeProject.slides.length ? "finished" : "paused" });
       setStatus(nextSlideIndex >= activeProject.slides.length ? "発表が終了しました。質疑応答を開始できます。" : "読み上げが完了しました");
     }, durationMs + 250);
-  }, [speakSlide, updateLiveState]);
+  }, [queueParagraph, speakSlide, updateLiveState]);
 
   useEffect(() => {
     if (!("BroadcastChannel" in window)) return;
@@ -503,9 +555,18 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
                 <textarea value={currentSlide.notes} onChange={(event) => updateCurrentSlide({ notes: event.target.value })} className="min-h-36 resize-y rounded-md border border-slate-200 p-3 font-normal leading-relaxed" placeholder="回答の根拠になる補足情報を入力" />
               </label>
               <label className="grid gap-1.5 text-sm font-semibold">
+                発表全体の知識
+                <textarea value={project?.knowledge ?? ""} onChange={(event) => setProject((current) => current ? { ...current, knowledge: event.target.value } : current)} className="min-h-36 resize-y rounded-md border border-slate-200 p-3 font-normal leading-relaxed" placeholder="ゼミで取り組んだこと、アプリ仕様、技術的な補足を入力" />
+              </label>
+              <label className="grid gap-1.5 text-sm font-semibold">
+                想定Q&A
+                <textarea value={project?.qa ?? ""} onChange={(event) => setProject((current) => current ? { ...current, qa: event.target.value } : current)} className="min-h-36 resize-y rounded-md border border-slate-200 p-3 font-normal leading-relaxed" placeholder="質問と回答例を入力" />
+              </label>
+              <label className="grid gap-1.5 text-sm font-semibold">
                 想定時間（秒）
                 <input type="number" min="1" max="3600" value={currentSlide.expectedDurationSeconds} onChange={(event) => updateCurrentSlide({ expectedDurationSeconds: Number(event.target.value) || 30 })} className="rounded-md border border-slate-200 px-3 py-2 font-normal" />
               </label>
+              <p className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">感情は読み上げ開始時に原稿の内容からAIが判定します。APIキー未設定・判定失敗時は通常モーションです。</p>
               <label className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold">
                 自動で次へ進む
                 <input type="checkbox" checked={project?.settings.autoAdvance ?? false} onChange={(event) => setProject((current) => current ? { ...current, settings: { ...current.settings, autoAdvance: event.target.checked } } : current)} className="size-4 accent-teal-600" />
