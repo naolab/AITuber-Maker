@@ -206,7 +206,7 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 ];
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
-const LIVE_CHAT_VISIBLE_COUNT = 10;
+const MAX_YOUTUBE_MESSAGE_HISTORY = 500;
 
 const createLiveSpeechSourceComment = (message: YouTubeChatMessage): LiveSpeechSourceComment => ({
   id: message.id,
@@ -639,15 +639,25 @@ export default function Home() {
     }
 
     if (emotionAssets.normal?.videoUrl && runtimeVideoRef0.current) {
-      if (!videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
+      const primaryVideo = runtimeVideoRef0.current;
+      // モード移動でvideo要素はアンマウントされるが、素材用のrefは残る。
+      // 新しくマウントされたvideo要素にはsrcが無いため、要素側も判定に含めて再初期化する。
+      const needsRestore = primaryVideo.src !== emotionAssets.normal.videoUrl;
+      if (needsRestore || !videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
+        activeVideoIndexRef.current = 0;
+        setActiveVideoIndex(0);
+        setCurrentEmotion("normal");
+        setMouthlessUrl(emotionAssets.normal.videoUrl);
+        setTrack(emotionAssets.normal.track);
         videoAsset0Ref.current = {
           videoUrl: emotionAssets.normal.videoUrl,
           track: emotionAssets.normal.track,
           emotion: "normal",
         };
-        runtimeVideoRef0.current.src = emotionAssets.normal.videoUrl;
-        runtimeVideoRef0.current.load();
-        void runtimeVideoRef0.current.play();
+        videoAsset1Ref.current = null;
+        primaryVideo.src = emotionAssets.normal.videoUrl;
+        primaryVideo.load();
+        void primaryVideo.play();
       }
     }
   }, [mode, emotionAssets, isLocalCharacterPreviewEnabled]);
@@ -815,11 +825,14 @@ export default function Home() {
 
     const incoming = (data.messages ?? []).filter((message) => message.message.trim());
     if (incoming.length) {
-      youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
-      setYoutubeMessages(incoming.slice(-LIVE_CHAT_VISIBLE_COUNT));
+      const newMessages = incoming.filter((message) => !youtubeMessageIdsRef.current.has(message.id));
+      incoming.forEach((message) => youtubeMessageIdsRef.current.add(message.id));
+      if (newMessages.length) {
+        setYoutubeMessages((current) => [...current, ...newMessages].slice(-MAX_YOUTUBE_MESSAGE_HISTORY));
+      }
     }
 
-    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${Math.min(incoming.length, LIVE_CHAT_VISIBLE_COUNT)}件表示`);
+    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / 最大${MAX_YOUTUBE_MESSAGE_HISTORY}件を保持`);
     return Math.max(1000, data.pollingIntervalMillis || 5000);
   }, [youtubeApiKey, youtubeVideoId, youtubeLiveChatId]);
 
@@ -2762,44 +2775,46 @@ JSONフォーマット例:
             )}
 
             {isYoutubeChatEnabled && (
-              <div className="absolute right-6 top-24 z-40 flex max-h-[58vh] w-[min(380px,calc(100vw-48px))] flex-col justify-end gap-2 overflow-hidden">
+              <div className="absolute right-6 top-24 z-40 flex h-[58vh] w-[min(380px,calc(100vw-48px))] flex-col gap-2">
                 <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
                   YouTube Chat · {youtubeChatStatus}
                 </div>
-                {youtubeMessages.map((message) => (
-                  <button
-                    key={message.id}
-                    type="button"
-                    onClick={() => setSelectedYoutubeMessageId(message.id)}
-                    className={`flex w-full gap-2 rounded-2xl border px-3 py-2 text-left text-sm text-slate-900 shadow-lg backdrop-blur-sm transition ${
-                      selectedYoutubeMessageId === message.id
-                        ? "border-teal-400 bg-teal-50/95 ring-2 ring-teal-300"
-                        : "border-white/20 bg-white/92 hover:border-teal-300 hover:bg-white"
-                    }`}
-                  >
-                    {message.authorImageUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={message.authorImageUrl}
-                        alt=""
-                        className="mt-0.5 size-7 flex-none rounded-full bg-slate-200"
-                      />
-                    ) : (
-                      <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
-                        {message.authorName.slice(0, 1)}
+                <div data-youtube-comment-list className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-1">
+                  {youtubeMessages.map((message) => (
+                    <button
+                      key={message.id}
+                      type="button"
+                      onClick={() => setSelectedYoutubeMessageId(message.id)}
+                      className={`flex w-full gap-2 rounded-2xl border px-3 py-2 text-left text-sm text-slate-900 shadow-lg backdrop-blur-sm transition ${
+                        selectedYoutubeMessageId === message.id
+                          ? "border-teal-400 bg-teal-50/95 ring-2 ring-teal-300"
+                          : "border-white/20 bg-white/92 hover:border-teal-300 hover:bg-white"
+                      }`}
+                    >
+                      {message.authorImageUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={message.authorImageUrl}
+                          alt=""
+                          className="mt-0.5 size-7 flex-none rounded-full bg-slate-200"
+                        />
+                      ) : (
+                        <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
+                          {message.authorName.slice(0, 1)}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
+                          {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
+                          {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
+                          {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
+                        </div>
+                        <div className="break-words leading-relaxed">{message.message}</div>
                       </div>
-                    )}
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-1">
-                        <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
-                        {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
-                        {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
-                        {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
-                      </div>
-                      <div className="break-words leading-relaxed">{message.message}</div>
-                    </div>
-                  </button>
-                ))}
+                    </button>
+                  ))}
+                </div>
                 {selectedYoutubeMessage && (
                   <div className="rounded-2xl border border-teal-200 bg-white/95 p-3 text-sm text-slate-900 shadow-xl backdrop-blur-sm">
                     <div className="flex items-start justify-between gap-3">
