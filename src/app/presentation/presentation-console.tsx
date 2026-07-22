@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, ChevronLeft, ChevronRight, FileUp, LoaderCircle, Pause, Play, Radio, Save } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, FileUp, LoaderCircle, Pause, Play, Radio, Save, Volume2 } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -9,6 +9,7 @@ import type {
   PresentationProjectListResponse,
   PresentationProjectSummary,
   PresentationLiveState,
+  PreparedSpeechManifest,
 } from "@/lib/presentation";
 
 type ProjectResponse = {
@@ -131,6 +132,35 @@ const getAudioDurationMs = async (audioBuffer: ArrayBuffer, fallbackSeconds: num
 
 const splitIntoParagraphs = (script: string) => script.split(/\r?\n\s*\r?\n+/).map((paragraph) => paragraph.trim()).filter(Boolean);
 
+const synthesizeSpeech = async (text: string, settings: SpeechSettings) => {
+  const response = await fetch("/api/aivis/synthesis", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      ttsType: settings.ttsType,
+      speaker: Number(settings.selectedSpeaker),
+      aivisUrl: settings.aivisUrl,
+      aivisCloudApiKey: settings.aivisCloudApiKey,
+      aivisCloudModelUuid: settings.aivisCloudModelUuid,
+      aivisCloudStyleId: settings.aivisCloudStyleId,
+      aivisCloudStyleName: settings.aivisCloudStyleName,
+      aivisCloudUserDictionaryUuid: settings.aivisCloudUserDictionaryUuid,
+      aivisCloudOutputFormat: settings.aivisCloudOutputFormat,
+      aivisCloudSpeakingRate: settings.aivisCloudSpeakingRate,
+      localSpeakingRate: settings.localSpeakingRate,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(detail.error || "音声合成に失敗しました");
+  }
+  return {
+    audioBuffer: await response.arrayBuffer(),
+    contentType: response.headers.get("content-type") || "audio/wav",
+  };
+};
+
 type PresentationConsoleProps = {
   embedded?: boolean;
 };
@@ -146,7 +176,9 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
   const [isImporting, setIsImporting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
   const [isDeleteConfirming, setIsDeleteConfirming] = useState(false);
+  const [preparedSpeech, setPreparedSpeech] = useState<PreparedSpeechManifest | null>(null);
   const autoAdvanceTimerRef = useRef(0);
   const queuedPresentationSpeechRef = useRef<QueuedPresentationSpeech | null>(null);
   const autoAdvanceEnabledRef = useRef(false);
@@ -178,6 +210,9 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     if (!response.ok || !data.project) throw new Error(data.error || "発表プロジェクトを読み込めませんでした");
     setProject(data.project);
     setCurrentSlideIndex(0);
+    const audioResponse = await fetch(`/api/presentation-audio?id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
+    const audioData = (await audioResponse.json()) as { manifest?: PreparedSpeechManifest };
+    setPreparedSpeech(audioData.manifest ?? null);
     setStatus(`${data.project.slides.length}ページを読み込みました`);
   };
 
@@ -227,6 +262,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
 
       setProject(data.project);
       setCurrentSlideIndex(0);
+      setPreparedSpeech({ projectId: data.project.id, preparedAt: "", entries: [] });
       setPdfFile(null);
       setTitle("");
       setStatus(`${data.project.slides.length}ページの発表プロジェクトを作成しました`);
@@ -270,6 +306,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       const data = (await response.json()) as ProjectResponse;
       if (!response.ok || !data.project) throw new Error(data.error || "PDFを更新できませんでした");
       setProject(data.project);
+      setPreparedSpeech(null);
       setCurrentSlideIndex((index) => Math.min(index, data.project!.slides.length - 1));
       setReplacementPdfFile(null);
       setStatus(`PDFを更新しました。${data.project.slides.length}ページです（同じページ番号の原稿・ノートは保持）。`);
@@ -289,6 +326,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       throw new Error(data.error || "プロジェクトを削除できませんでした");
     }
     setProject(null);
+    setPreparedSpeech(null);
     setCurrentSlideIndex(0);
     setIsDeleteConfirming(false);
     setStatus("プロジェクトを削除しました");
@@ -326,6 +364,70 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       setStatus(error instanceof Error ? error.message : "保存できませんでした");
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const loadPreparedParagraphs = useCallback(async (activeProject: PresentationProject, slideIndex: number, texts: string[]) => {
+    const entries = preparedSpeech?.projectId === activeProject.id ? preparedSpeech.entries : [];
+    const matchingEntries = texts.map((text, paragraphIndex) => entries.find((entry) =>
+      entry.slideIndex === slideIndex && entry.paragraphIndex === paragraphIndex && entry.text === text,
+    ));
+    if (matchingEntries.some((entry) => !entry)) return null;
+
+    return Promise.all(matchingEntries.map(async (entry) => {
+      const response = await fetch(entry!.audioUrl, { cache: "no-store" });
+      if (!response.ok) throw new Error("準備済み音声を読み込めませんでした。発表を準備し直してください");
+      return {
+        text: entry!.text,
+        emotion: entry!.emotion,
+        audioBuffer: await response.arrayBuffer(),
+        contentType: entry!.contentType,
+        durationMs: entry!.durationMs,
+      } satisfies PreparedParagraph;
+    }));
+  }, [preparedSpeech]);
+
+  const prepareProjectSpeech = async () => {
+    const activeProject = project;
+    if (!activeProject || isPreparingSpeech) return;
+    const targets = activeProject.slides.flatMap((slide, slideIndex) =>
+      splitIntoParagraphs(slide.script).map((text, paragraphIndex) => ({ slide, slideIndex, text, paragraphIndex })),
+    );
+    if (targets.length === 0) {
+      setStatus("読み上げ原稿を入力してから発表を準備してください");
+      return;
+    }
+
+    setIsPreparingSpeech(true);
+    try {
+      const settings = getSpeechSettings();
+      for (const [index, target] of targets.entries()) {
+        setStatus(`発表を準備中 ${index + 1}/${targets.length}（${target.slide.page}ページ目・段落 ${target.paragraphIndex + 1}）`);
+        const emotion = await resolvePresentationEmotion(target.text, settings);
+        const { audioBuffer, contentType } = await synthesizeSpeech(target.text, settings);
+        const durationMs = await getAudioDurationMs(audioBuffer, Math.max(1, Math.round(target.slide.expectedDurationSeconds / splitIntoParagraphs(target.slide.script).length)));
+        const formData = new FormData();
+        formData.set("projectId", activeProject.id);
+        formData.set("slideIndex", String(target.slideIndex));
+        formData.set("paragraphIndex", String(target.paragraphIndex));
+        formData.set("text", target.text);
+        formData.set("emotion", emotion);
+        formData.set("durationMs", String(durationMs));
+        formData.set("audio", new File([audioBuffer], "speech", { type: contentType }));
+        const response = await fetch("/api/presentation-audio", { method: "POST", body: formData });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({})) as { error?: string };
+          throw new Error(detail.error || "準備済み音声を保存できませんでした");
+        }
+      }
+      const response = await fetch(`/api/presentation-audio?id=${encodeURIComponent(activeProject.id)}`, { cache: "no-store" });
+      const data = (await response.json()) as { manifest?: PreparedSpeechManifest };
+      setPreparedSpeech(data.manifest ?? null);
+      setStatus(`${targets.length}段落の音声を準備しました。本番ではOpenAI・音声合成を呼び出さずに再生します。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "発表準備に失敗しました");
+    } finally {
+      setIsPreparingSpeech(false);
     }
   };
 
@@ -385,42 +487,19 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     setStatus(`${slide.page}ページ目は、キャラクターの次のループ開始で読み上げます`);
 
     try {
-      const speechSettings = getSpeechSettings();
       const texts = splitIntoParagraphs(slide.script);
-      const paragraphs: PreparedParagraph[] = [];
-      for (const [index, text] of texts.entries()) {
-        setStatus(`${slide.page}ページ目・段落 ${index + 1}/${texts.length} を準備中...`);
-        const emotion = await resolvePresentationEmotion(text, speechSettings);
-        const synthResponse = await fetch("/api/aivis/synthesis", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          ttsType: speechSettings.ttsType,
-          speaker: Number(speechSettings.selectedSpeaker),
-          aivisUrl: speechSettings.aivisUrl,
-          aivisCloudApiKey: speechSettings.aivisCloudApiKey,
-          aivisCloudModelUuid: speechSettings.aivisCloudModelUuid,
-          aivisCloudStyleId: speechSettings.aivisCloudStyleId,
-          aivisCloudStyleName: speechSettings.aivisCloudStyleName,
-          aivisCloudUserDictionaryUuid: speechSettings.aivisCloudUserDictionaryUuid,
-          aivisCloudOutputFormat: speechSettings.aivisCloudOutputFormat,
-          aivisCloudSpeakingRate: speechSettings.aivisCloudSpeakingRate,
-          localSpeakingRate: speechSettings.localSpeakingRate,
-        }),
-        });
-        if (!synthResponse.ok) {
-        const detail = await synthResponse.json().catch(() => ({})) as { error?: string };
-        throw new Error(detail.error || "音声合成に失敗しました");
+      let paragraphs = await loadPreparedParagraphs(activeProject, slideIndex, texts);
+      if (paragraphs) {
+        setStatus(`${slide.page}ページ目の準備済み音声を再生します`);
+      } else {
+        const speechSettings = getSpeechSettings();
+        paragraphs = [];
+        for (const [index, text] of texts.entries()) {
+          setStatus(`${slide.page}ページ目・段落 ${index + 1}/${texts.length} をその場で準備中...`);
+          const emotion = await resolvePresentationEmotion(text, speechSettings);
+          const { audioBuffer, contentType } = await synthesizeSpeech(text, speechSettings);
+          paragraphs.push({ text, emotion, audioBuffer, contentType, durationMs: await getAudioDurationMs(audioBuffer, Math.max(1, Math.round(slide.expectedDurationSeconds / texts.length))) });
         }
-        const audioBuffer = await synthResponse.arrayBuffer();
-        paragraphs.push({
-          text,
-          emotion,
-          audioBuffer,
-          contentType: synthResponse.headers.get("content-type") || "audio/wav",
-          durationMs: await getAudioDurationMs(audioBuffer, Math.max(1, Math.round(slide.expectedDurationSeconds / texts.length))),
-        });
       }
       const presentationState: PresentationLiveState = {
         enabled: true,
@@ -442,7 +521,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       await updateLiveState({ status: "paused" }).catch(() => {});
       setStatus(error instanceof Error ? error.message : "読み上げを開始できませんでした");
     }
-  }, [project, queueParagraph, updateLiveState]);
+  }, [loadPreparedParagraphs, project, queueParagraph, updateLiveState]);
 
   const stopAutoAdvance = async () => {
     if (autoAdvanceTimerRef.current) window.clearTimeout(autoAdvanceTimerRef.current);
@@ -498,6 +577,15 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
   const currentSlide = project?.slides[currentSlideIndex] ?? null;
   const completedScripts = useMemo(
     () => project?.slides.filter((slide) => slide.script.trim()).length ?? 0,
+    [project],
+  );
+  const preparedParagraphCount = useMemo(() => {
+    if (!project || preparedSpeech?.projectId !== project.id) return 0;
+    return project.slides.reduce((count, slide, slideIndex) => count + splitIntoParagraphs(slide.script)
+      .filter((text, paragraphIndex) => preparedSpeech.entries.some((entry) => entry.slideIndex === slideIndex && entry.paragraphIndex === paragraphIndex && entry.text === text)).length, 0);
+  }, [preparedSpeech, project]);
+  const totalParagraphCount = useMemo(
+    () => project?.slides.reduce((count, slide) => count + splitIntoParagraphs(slide.script).length, 0) ?? 0,
     [project],
   );
 
@@ -569,9 +657,13 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="font-bold">{project?.title}</h2>
-                  <p className="text-xs text-slate-500">原稿入力済み {completedScripts}/{project?.slides.length}ページ · 想定 {project?.slides.reduce((sum, slide) => sum + slide.expectedDurationSeconds, 0)}秒</p>
+                  <p className="text-xs text-slate-500">原稿入力済み {completedScripts}/{project?.slides.length}ページ · 音声準備済み {preparedParagraphCount}/{totalParagraphCount}段落 · 想定 {project?.slides.reduce((sum, slide) => sum + slide.expectedDurationSeconds, 0)}秒</p>
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
+                  <button type="button" onClick={() => void prepareProjectSpeech()} disabled={isPreparingSpeech || isSpeaking || totalParagraphCount === 0} className="flex items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-bold text-violet-800 disabled:opacity-50">
+                    {isPreparingSpeech ? <LoaderCircle className="size-4 animate-spin" /> : <Volume2 className="size-4" />}
+                    発表を準備
+                  </button>
                   <button type="button" onClick={() => void showCurrentSlideInLive().then(() => setStatus("OBS出力に現在のスライドを表示しました")).catch((error) => setStatus(error instanceof Error ? error.message : "OBS出力へ表示できませんでした"))} className="flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-bold hover:bg-slate-50">
                     <Radio className="size-4" />
                     OBSに表示
@@ -639,7 +731,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
                 想定時間（秒）
                 <input type="number" min="1" max="3600" value={currentSlide.expectedDurationSeconds} onChange={(event) => updateCurrentSlide({ expectedDurationSeconds: Number(event.target.value) || 30 })} className="rounded-md border border-slate-200 px-3 py-2 font-normal" />
               </label>
-              <p className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">感情は読み上げ開始時に原稿の内容からAIが判定します。APIキー未設定・判定失敗時は通常モーションです。</p>
+              <p className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">「発表を準備」で段落ごとの感情判定と音声合成を先に保存します。原稿を変更した段落は準備し直してください。本番は準備済みの段落を優先し、未準備分だけその場で合成します。</p>
               <label className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 text-sm font-semibold">
                 自動で次へ進む
                 <input type="checkbox" checked={project?.settings.autoAdvance ?? false} onChange={(event) => setProject((current) => current ? { ...current, settings: { ...current.settings, autoAdvance: event.target.checked } } : current)} className="size-4 accent-teal-600" />

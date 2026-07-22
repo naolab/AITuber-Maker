@@ -36,6 +36,22 @@ export type PresentationProjectListResponse = {
   projects: PresentationProjectSummary[];
 };
 
+export type PreparedSpeechEntry = {
+  slideIndex: number;
+  paragraphIndex: number;
+  text: string;
+  emotion: "normal" | "happy" | "angry" | "surprised" | "sad";
+  audioUrl: string;
+  contentType: string;
+  durationMs: number;
+};
+
+export type PreparedSpeechManifest = {
+  projectId: string;
+  preparedAt: string;
+  entries: PreparedSpeechEntry[];
+};
+
 export type PresentationLiveStatus = "idle" | "ready" | "presenting" | "paused" | "finished";
 
 export type PresentationLiveState = {
