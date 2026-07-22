@@ -48,6 +48,16 @@ type QueuedPresentationSpeech = {
   paragraphIndex: number;
 };
 
+type LiveSpeechProgress = {
+  id: string;
+  status?: "queued" | "started" | "ended";
+};
+
+type PresentationPlaybackProgress = {
+  state?: { status?: "idle" | "queued" | "playing" | "finished" | "stopped" };
+  segment?: { slideIndex?: number } | null;
+};
+
 const canvasToPng = (canvas: HTMLCanvasElement, fileName: string) =>
   new Promise<File>((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -131,6 +141,7 @@ const getAudioDurationMs = async (audioBuffer: ArrayBuffer, fallbackSeconds: num
 };
 
 const splitIntoParagraphs = (script: string) => script.split(/\r?\n\s*\r?\n+/).map((paragraph) => paragraph.trim()).filter(Boolean);
+const normalizeScriptText = (text: string) => text.replace(/\r\n?/g, "\n").trim();
 
 const synthesizeSpeech = async (text: string, settings: SpeechSettings) => {
   const response = await fetch("/api/aivis/synthesis", {
@@ -181,6 +192,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
   const [preparedSpeech, setPreparedSpeech] = useState<PreparedSpeechManifest | null>(null);
   const autoAdvanceTimerRef = useRef(0);
   const queuedPresentationSpeechRef = useRef<QueuedPresentationSpeech | null>(null);
+  const activePresentationSpeechRef = useRef<QueuedPresentationSpeech | null>(null);
   const autoAdvanceEnabledRef = useRef(false);
 
   const loadProjects = useCallback(async () => {
@@ -370,7 +382,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
   const loadPreparedParagraphs = useCallback(async (activeProject: PresentationProject, slideIndex: number, texts: string[]) => {
     const entries = preparedSpeech?.projectId === activeProject.id ? preparedSpeech.entries : [];
     const matchingEntries = texts.map((text, paragraphIndex) => entries.find((entry) =>
-      entry.slideIndex === slideIndex && entry.paragraphIndex === paragraphIndex && entry.text === text,
+      entry.slideIndex === slideIndex && entry.paragraphIndex === paragraphIndex && normalizeScriptText(entry.text) === normalizeScriptText(text),
     ));
     if (matchingEntries.some((entry) => !entry)) return null;
 
@@ -468,7 +480,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       channel.postMessage({ type: "speech", id, emotion: paragraph.emotion, text: paragraph.text, audioBuffer: liveAudioBuffer, presentationState });
       channel.close();
     }
-    const response = await fetch("/api/live-speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, emotion: paragraph.emotion, text: paragraph.text, audioBase64: arrayBufferToBase64(liveAudioBuffer), contentType: paragraph.contentType }) });
+    const response = await fetch("/api/live-speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, emotion: paragraph.emotion, text: paragraph.text, audioBase64: arrayBufferToBase64(liveAudioBuffer), contentType: paragraph.contentType, presentationState }) });
     if (!response.ok) throw new Error("OBS出力へ読み上げを送信できませんでした");
   }, []);
 
@@ -487,6 +499,21 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     setStatus(`${slide.page}ページ目は、キャラクターの次のループ開始で読み上げます`);
 
     try {
+      if (preparedSpeech?.projectId === activeProject.id) {
+        const playbackResponse = await fetch("/api/presentation-playback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: activeProject.id, startSlideIndex: slideIndex, mode: autoAdvance ? "from-slide" : "slide" }),
+        });
+        if (playbackResponse.ok) {
+          setStatus(autoAdvance ? `${slide.page}ページ目から発表キューを開始しました` : `${slide.page}ページ目の発表キューを開始しました`);
+          return;
+        }
+        if (playbackResponse.status !== 409) {
+          const detail = await playbackResponse.json().catch(() => ({})) as { error?: string };
+          throw new Error(detail.error || "発表キューを開始できませんでした");
+        }
+      }
       const texts = splitIntoParagraphs(slide.script);
       let paragraphs = await loadPreparedParagraphs(activeProject, slideIndex, texts);
       if (paragraphs) {
@@ -517,27 +544,62 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
       setStatus(`${slide.page}ページ目の読み上げ開始を待っています`);
     } catch (error) {
       queuedPresentationSpeechRef.current = null;
+      activePresentationSpeechRef.current = null;
       setIsSpeaking(false);
       await updateLiveState({ status: "paused" }).catch(() => {});
       setStatus(error instanceof Error ? error.message : "読み上げを開始できませんでした");
     }
-  }, [loadPreparedParagraphs, project, queueParagraph, updateLiveState]);
+  }, [loadPreparedParagraphs, preparedSpeech, project, queueParagraph, updateLiveState]);
 
   const stopAutoAdvance = async () => {
     if (autoAdvanceTimerRef.current) window.clearTimeout(autoAdvanceTimerRef.current);
     autoAdvanceTimerRef.current = 0;
     autoAdvanceEnabledRef.current = false;
+    queuedPresentationSpeechRef.current = null;
+    activePresentationSpeechRef.current = null;
     setIsSpeaking(false);
+    await fetch("/api/presentation-playback", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "stop" }),
+    }).catch(() => {});
     await updateLiveState({ status: "paused" });
     setStatus("自動進行を停止しました。再生中の音声はOBS側で最後まで再生されます。");
   };
+
+  const advanceAfterSpeechEnded = useCallback((speechId: string) => {
+    const activeSpeech = activePresentationSpeechRef.current;
+    if (!activeSpeech || activeSpeech.id !== speechId) return;
+    activePresentationSpeechRef.current = null;
+    if (autoAdvanceTimerRef.current) window.clearTimeout(autoAdvanceTimerRef.current);
+    autoAdvanceTimerRef.current = 0;
+
+    const { project: activeProject, slideIndex, autoAdvance, presentationState, paragraphs, paragraphIndex } = activeSpeech;
+    const slide = activeProject.slides[slideIndex];
+    if (!slide) return;
+    if (paragraphIndex + 1 < paragraphs.length) {
+      void queueParagraph({ project: activeProject, slideIndex, autoAdvance, presentationState, paragraphs, paragraphIndex: paragraphIndex + 1 })
+        .then(() => setStatus(`${slide.page}ページ目・段落 ${paragraphIndex + 2}/${paragraphs.length} の読み上げ開始を待っています`))
+        .catch((error) => setStatus(error instanceof Error ? error.message : "次の段落を送信できませんでした"));
+      return;
+    }
+    const nextSlideIndex = slideIndex + 1;
+    setIsSpeaking(false);
+    if (autoAdvance && autoAdvanceEnabledRef.current && nextSlideIndex < activeProject.slides.length) {
+      void speakSlide(nextSlideIndex, true);
+      return;
+    }
+    void updateLiveState({ status: nextSlideIndex >= activeProject.slides.length ? "finished" : "paused" });
+    setStatus(nextSlideIndex >= activeProject.slides.length ? "発表が終了しました。質疑応答を開始できます。" : "読み上げが完了しました");
+  }, [queueParagraph, speakSlide, updateLiveState]);
 
   const handleSpeechStarted = useCallback((speechId: string) => {
     const queuedSpeech = queuedPresentationSpeechRef.current;
     if (!queuedSpeech || queuedSpeech.id !== speechId) return;
 
     queuedPresentationSpeechRef.current = null;
-    const { project: activeProject, slideIndex, autoAdvance, durationMs, presentationState, paragraphs, paragraphIndex } = queuedSpeech;
+    activePresentationSpeechRef.current = queuedSpeech;
+    const { project: activeProject, slideIndex, durationMs, presentationState, paragraphs, paragraphIndex } = queuedSpeech;
     const slide = activeProject.slides[slideIndex];
     if (!slide) return;
 
@@ -545,23 +607,9 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     setStatus(`${slide.page}ページ目・段落 ${paragraphIndex + 1}/${paragraphs.length} を読み上げ中`);
     void updateLiveState(presentationState);
 
-    autoAdvanceTimerRef.current = window.setTimeout(() => {
-      if (paragraphIndex + 1 < paragraphs.length) {
-        void queueParagraph({ project: activeProject, slideIndex, autoAdvance, presentationState, paragraphs, paragraphIndex: paragraphIndex + 1 })
-          .then(() => setStatus(`${slide.page}ページ目・段落 ${paragraphIndex + 2}/${paragraphs.length} の読み上げ開始を待っています`))
-          .catch((error) => setStatus(error instanceof Error ? error.message : "次の段落を送信できませんでした"));
-        return;
-      }
-      const nextSlideIndex = slideIndex + 1;
-      setIsSpeaking(false);
-      if (autoAdvance && autoAdvanceEnabledRef.current && nextSlideIndex < activeProject.slides.length) {
-        void speakSlide(nextSlideIndex, true);
-        return;
-      }
-      void updateLiveState({ status: nextSlideIndex >= activeProject.slides.length ? "finished" : "paused" });
-      setStatus(nextSlideIndex >= activeProject.slides.length ? "発表が終了しました。質疑応答を開始できます。" : "読み上げが完了しました");
-    }, durationMs + 250);
-  }, [queueParagraph, speakSlide, updateLiveState]);
+    // ライブ画面からの終了通知が届かない場合だけ、保存済み音声尺で進める安全弁。
+    autoAdvanceTimerRef.current = window.setTimeout(() => advanceAfterSpeechEnded(speechId), durationMs + 3_000);
+  }, [advanceAfterSpeechEnded, updateLiveState]);
 
   useEffect(() => {
     if (!("BroadcastChannel" in window)) return;
@@ -574,6 +622,59 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
     return () => channel.close();
   }, [handleSpeechStarted]);
 
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/live-speech", { cache: "no-store" });
+        const data = (await response.json()) as { speech?: LiveSpeechProgress | null };
+        if (!disposed && data.speech?.status === "started") handleSpeechStarted(data.speech.id);
+        if (!disposed && data.speech?.status === "ended") {
+          // 開始通知だけが一時的に失われても、終了通知から進行を復帰する。
+          if (queuedPresentationSpeechRef.current?.id === data.speech.id) handleSpeechStarted(data.speech.id);
+          advanceAfterSpeechEnded(data.speech.id);
+        }
+      } catch {
+        // 一時的な通信失敗は次回の監視で回復する。
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 400);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [advanceAfterSpeechEnded, handleSpeechStarted]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/presentation-playback", { cache: "no-store" });
+        const data = (await response.json()) as PresentationPlaybackProgress;
+        if (disposed) return;
+        if (typeof data.segment?.slideIndex === "number") setCurrentSlideIndex(data.segment.slideIndex);
+        if (isSpeaking && data.state?.status === "finished") {
+          setIsSpeaking(false);
+          setStatus("発表が終了しました。質疑応答を開始できます。");
+        }
+        if (isSpeaking && data.state?.status === "stopped") setIsSpeaking(false);
+      } catch {
+        // サーバーキューは保持されるため、次回の監視で状態を回復できる。
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 800);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [isSpeaking]);
+
   const currentSlide = project?.slides[currentSlideIndex] ?? null;
   const completedScripts = useMemo(
     () => project?.slides.filter((slide) => slide.script.trim()).length ?? 0,
@@ -582,7 +683,7 @@ export default function PresentationConsole({ embedded = false }: PresentationCo
   const preparedParagraphCount = useMemo(() => {
     if (!project || preparedSpeech?.projectId !== project.id) return 0;
     return project.slides.reduce((count, slide, slideIndex) => count + splitIntoParagraphs(slide.script)
-      .filter((text, paragraphIndex) => preparedSpeech.entries.some((entry) => entry.slideIndex === slideIndex && entry.paragraphIndex === paragraphIndex && entry.text === text)).length, 0);
+      .filter((text, paragraphIndex) => preparedSpeech.entries.some((entry) => entry.slideIndex === slideIndex && entry.paragraphIndex === paragraphIndex && normalizeScriptText(entry.text) === normalizeScriptText(text))).length, 0);
   }, [preparedSpeech, project]);
   const totalParagraphCount = useMemo(
     () => project?.slides.reduce((count, slide) => count + splitIntoParagraphs(slide.script).length, 0) ?? 0,

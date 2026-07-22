@@ -15,6 +15,7 @@ import {
   Plus,
   Presentation,
   Radio,
+  RotateCcw,
   Send,
   Settings,
   Sparkles,
@@ -199,6 +200,7 @@ type LiveSettingsPatch = Partial<{
   youtubeChatWidth: number;
   youtubeChatStatusVisible: boolean;
   youtubeChatVisibleCount: number;
+  characterLayout: { x: number; y: number; scale: number };
 }>;
 
 type PersonaSettings = {
@@ -820,6 +822,15 @@ export default function Home() {
     setYoutubeChatVisibleCount(next);
     localStorage.setItem("youtube_chat_visible_count", String(next));
     void saveLiveSettingsForObs({ youtubeChatVisibleCount: next });
+  };
+
+  const resetObsCharacterLayout = async () => {
+    try {
+      await saveLiveSettingsForObs({ characterLayout: { x: 0, y: 0, scale: 1 } });
+      setLiveAssetSyncStatus("OBS用キャラの位置と拡大率を初期値へ戻しました");
+    } catch (error) {
+      setLiveAssetSyncStatus(error instanceof Error ? error.message : "キャラ位置をリセットできませんでした");
+    }
   };
 
   const handleYoutubeVideoIdChange = (videoId: string) => {
@@ -3573,6 +3584,16 @@ ${presentationContext ? `以下は現在のゼミ発表の根拠資料です。�
                 <div className="h-px bg-slate-200 my-4" />
                 
                 <div className="grid gap-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800">OBS用キャラの表示位置</p>
+                      <p className="mt-1 text-xs text-slate-500">ドラッグや拡大で画面外へ移動したキャラを、中央の初期位置へ戻します。</p>
+                    </div>
+                    <button type="button" onClick={() => void resetObsCharacterLayout()} className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100">
+                      <RotateCcw className="size-3.5" />
+                      キャラ位置をリセット
+                    </button>
+                  </div>
                   <label className="text-sm font-semibold text-slate-800">配信モードの背景</label>
                   
                   {/* Selector between Color and Image */}

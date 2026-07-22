@@ -29,6 +29,7 @@ new-app-requirements.md
 .aituber-live-chat-cache.json
 .aituber-live-speech.json
 .aituber-presentation-live.json
+.aituber-presentation-playback.json
 
 # local model artifacts
 public/models/*

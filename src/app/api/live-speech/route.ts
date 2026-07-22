@@ -3,6 +3,10 @@ import path from "node:path";
 
 import { NextResponse } from "next/server";
 
+import type { PresentationLiveState } from "@/lib/presentation";
+
+type LiveSpeechStatus = "queued" | "started" | "ended";
+
 type LiveSpeech = {
   id: string;
   emotion: "normal" | "happy" | "angry" | "surprised" | "sad";
@@ -14,6 +18,10 @@ type LiveSpeech = {
     authorName: string;
     message: string;
   };
+  presentationState?: PresentationLiveState;
+  status: LiveSpeechStatus;
+  startedAt: number;
+  endedAt: number;
   createdAt: number;
 };
 
@@ -28,6 +36,7 @@ const isLiveSpeech = (value: unknown): value is LiveSpeech => {
     typeof speech.audioBase64 === "string" &&
     typeof speech.contentType === "string" &&
     typeof speech.createdAt === "number" &&
+    (speech.status === "queued" || speech.status === "started" || speech.status === "ended") &&
     (speech.emotion === "normal" ||
       speech.emotion === "happy" ||
       speech.emotion === "angry" ||
@@ -57,6 +66,13 @@ const sanitizeSourceComment = (value: unknown) => {
   };
 };
 
+const sanitizePresentationState = (value: unknown) => {
+  if (!value || typeof value !== "object") return undefined;
+  const state = value as Partial<PresentationLiveState>;
+  if (typeof state.projectId !== "string" || typeof state.slideImageUrl !== "string") return undefined;
+  return state as PresentationLiveState;
+};
+
 export async function GET() {
   const speech = await readSpeech();
   return NextResponse.json({ speech }, { headers: { "Cache-Control": "no-store" } });
@@ -77,6 +93,10 @@ export async function POST(request: Request) {
     audioBase64: typeof input?.audioBase64 === "string" ? input.audioBase64 : "",
     contentType: typeof input?.contentType === "string" && input.contentType ? input.contentType : "audio/wav",
     sourceComment: sanitizeSourceComment(input?.sourceComment),
+    presentationState: sanitizePresentationState(input?.presentationState),
+    status: "queued",
+    startedAt: 0,
+    endedAt: 0,
     createdAt: Date.now(),
   };
 
@@ -87,4 +107,27 @@ export async function POST(request: Request) {
   await mkdir(path.dirname(SPEECH_PATH), { recursive: true });
   await writeFile(SPEECH_PATH, `${JSON.stringify(speech, null, 2)}\n`);
   return NextResponse.json({ speech }, { headers: { "Cache-Control": "no-store" } });
+}
+
+export async function PATCH(request: Request) {
+  const input = (await request.json().catch(() => null)) as { id?: unknown; status?: unknown } | null;
+  const id = typeof input?.id === "string" ? input.id : "";
+  const status = input?.status;
+  if (!id || (status !== "started" && status !== "ended")) {
+    return NextResponse.json({ error: "発話状態の情報が不正です" }, { status: 400 });
+  }
+  const speech = await readSpeech();
+  if (!speech || speech.id !== id) return NextResponse.json({ error: "対象の発話が見つかりません" }, { status: 404 });
+  if (speech.status === "ended" && status === "started") {
+    return NextResponse.json({ speech }, { headers: { "Cache-Control": "no-store" } });
+  }
+  const now = Date.now();
+  const updated: LiveSpeech = {
+    ...speech,
+    status,
+    startedAt: status === "started" ? now : speech.startedAt,
+    endedAt: status === "ended" ? now : speech.endedAt,
+  };
+  await writeFile(SPEECH_PATH, `${JSON.stringify(updated, null, 2)}\n`);
+  return NextResponse.json({ speech: updated }, { headers: { "Cache-Control": "no-store" } });
 }

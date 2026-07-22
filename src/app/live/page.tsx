@@ -74,6 +74,8 @@ type StoredLiveSpeech = {
   audioBase64: string;
   contentType: string;
   sourceComment?: LiveSpeechSourceComment;
+  presentationState?: PresentationLiveState;
+  status?: "queued" | "started" | "ended";
   createdAt: number;
 };
 
@@ -92,6 +94,35 @@ type PendingSpeech = {
   audioBuffer: ArrayBuffer;
   sourceComment?: LiveSpeechSourceComment;
   presentationState?: PresentationLiveState;
+  playbackSegmentId?: string;
+};
+
+type PresentationPlaybackSegment = {
+  id: string;
+  text: string;
+  emotion: Emotion;
+  audioUrl: string;
+  contentType: string;
+  slideIndex: number;
+  projectId: string;
+  projectTitle: string;
+  slideCount: number;
+  slideImageUrl: string;
+};
+
+type PresentationPlaybackResponse = {
+  state?: { status?: string };
+  segment?: PresentationPlaybackSegment | null;
+};
+
+const reportSpeechStatus = (id: string, status: "started" | "ended", attempt = 0) => {
+  void fetch("/api/live-speech", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, status }),
+  }).catch(() => {
+    if (attempt < 2) window.setTimeout(() => reportSpeechStatus(id, status, attempt + 1), 500 * (attempt + 1));
+  });
 };
 
 type ServerLiveAsset = {
@@ -357,6 +388,7 @@ export default function LiveOutputPage() {
   const youtubeLiveChatIdRef = useRef("");
   const youtubeSourceKeyRef = useRef("");
   const lastSpeechIdRef = useRef("");
+  const lastPlaybackSegmentIdRef = useRef("");
   const overlayHideTimerRef = useRef(0);
   const sourceCommentSettleTimerRef = useRef(0);
 
@@ -637,7 +669,7 @@ export default function LiveOutputPage() {
     void video.play();
   }, [assets.normal.videoUrl]);
 
-  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer, speechId?: string, presentationState?: PresentationLiveState) => {
+  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer, speechId?: string, presentationState?: PresentationLiveState, playbackSegmentId?: string) => {
     const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
     if (!AudioContextClass) {
       setStatus("このブラウザはWeb Audio APIに対応していません");
@@ -696,7 +728,17 @@ export default function LiveOutputPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(clearedState),
-        });
+        }).catch(() => {});
+      }
+      if (speechId) {
+        reportSpeechStatus(speechId, "ended");
+      }
+      if (playbackSegmentId) {
+        void fetch("/api/presentation-playback", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "ended", segmentId: playbackSegmentId }),
+        }).catch(() => {});
       }
       isSpeakingRef.current = false;
     };
@@ -709,9 +751,19 @@ export default function LiveOutputPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(presentationState),
-      });
+      }).catch(() => {});
     }
     source.start(0);
+    if (speechId) {
+      reportSpeechStatus(speechId, "started");
+    }
+    if (playbackSegmentId) {
+      void fetch("/api/presentation-playback", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "started", segmentId: playbackSegmentId }),
+      }).catch(() => {});
+    }
     if (speechId && "BroadcastChannel" in window) {
       const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
       const message: LiveSpeechStartedMessage = { type: "speech-started", id: speechId };
@@ -725,6 +777,24 @@ export default function LiveOutputPage() {
     setPendingSpeech(speech);
     pendingSpeechRef.current = speech;
   }, []);
+
+  const forceStartPendingSpeech = useCallback(async (expected: PendingSpeech) => {
+    if (pendingSpeechRef.current !== expected || isSpeakingRef.current) return;
+    pendingSpeechRef.current = null;
+    setPendingSpeech(null);
+    showSpeechOverlay(expected.text, expected.sourceComment);
+    await playAudioAndSyncMouth(expected.audioBuffer, expected.id, expected.presentationState, expected.playbackSegmentId);
+    const video = getActiveVideo();
+    if (video?.paused) void video.play();
+  }, [playAudioAndSyncMouth, showSpeechOverlay]);
+
+  useEffect(() => {
+    if (!pendingSpeech) return;
+    const timer = window.setTimeout(() => {
+      void forceStartPendingSpeech(pendingSpeech);
+    }, 9_000);
+    return () => window.clearTimeout(timer);
+  }, [forceStartPendingSpeech, pendingSpeech]);
 
   const handleVideoEnded = useCallback(async () => {
     const activeIndex = activeVideoIndexRef.current;
@@ -746,7 +816,7 @@ export default function LiveOutputPage() {
       }
 
       showSpeechOverlay(pending.text, pending.sourceComment);
-      await playAudioAndSyncMouth(pending.audioBuffer, pending.id, pending.presentationState);
+      await playAudioAndSyncMouth(pending.audioBuffer, pending.id, pending.presentationState, pending.playbackSegmentId);
       setPendingSpeech(null);
       pendingSpeechRef.current = null;
 
@@ -808,6 +878,50 @@ export default function LiveOutputPage() {
   useEffect(() => {
     let disposed = false;
     let timer = 0;
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/presentation-playback", { cache: "no-store" });
+        const data = (await response.json()) as PresentationPlaybackResponse;
+        const segment = data.segment;
+        if (!disposed && data.state?.status === "queued" && segment && segment.id !== lastPlaybackSegmentIdRef.current) {
+          lastPlaybackSegmentIdRef.current = segment.id;
+          const audioResponse = await fetch(segment.audioUrl, { cache: "no-store" });
+          if (!audioResponse.ok) throw new Error("準備済み音声を読み込めませんでした");
+          queueLiveSpeech({
+            id: undefined,
+            emotion: segment.emotion,
+            text: segment.text,
+            audioBuffer: await audioResponse.arrayBuffer(),
+            presentationState: {
+              enabled: true,
+              status: "presenting",
+              projectId: segment.projectId,
+              projectTitle: segment.projectTitle,
+              slideIndex: segment.slideIndex,
+              slideCount: segment.slideCount,
+              slideImageUrl: segment.slideImageUrl,
+              caption: segment.text,
+              updatedAt: Date.now(),
+            },
+            playbackSegmentId: segment.id,
+          });
+        }
+      } catch {
+        // 次回の監視で再試行する。発表キューはサーバーに残る。
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 400);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [queueLiveSpeech]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
 
     const poll = async () => {
       try {
@@ -822,6 +936,7 @@ export default function LiveOutputPage() {
             text: speech.text,
             audioBuffer: base64ToArrayBuffer(speech.audioBase64),
             sourceComment: speech.sourceComment,
+            presentationState: speech.presentationState,
           });
         }
       } catch (error) {
