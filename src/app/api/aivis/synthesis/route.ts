@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
       aivisCloudUserDictionaryUuid,
       aivisCloudOutputFormat,
       aivisCloudSpeakingRate,
+      localSpeakingRate,
     } = await req.json();
 
     if (!text) {
@@ -102,6 +103,10 @@ export async function POST(req: NextRequest) {
     }
 
     const audioQuery = await queryRes.json();
+    const speakingRate = Number(localSpeakingRate);
+    if (Number.isFinite(speakingRate)) {
+      audioQuery.speedScale = Math.min(2, Math.max(0.5, speakingRate));
+    }
 
     // 2. Synthesize audio
     const synthUrl = new URL("/synthesis", aivisUrl);

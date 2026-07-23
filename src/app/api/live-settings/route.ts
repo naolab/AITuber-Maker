@@ -16,6 +16,10 @@ type LiveSettings = {
   youtubeVideoId: string;
   youtubeLiveChatId: string;
   youtubeChatEnabled: boolean;
+  captionsEnabled: boolean;
+  youtubeChatWidth: number;
+  youtubeChatStatusVisible: boolean;
+  youtubeChatVisibleCount: number;
   characterLayout: OverlayLayout;
   chatLayout: OverlayLayout;
 };
@@ -27,6 +31,10 @@ const DEFAULT_SETTINGS: LiveSettings = {
   youtubeVideoId: "",
   youtubeLiveChatId: "",
   youtubeChatEnabled: false,
+  captionsEnabled: true,
+  youtubeChatWidth: 360,
+  youtubeChatStatusVisible: true,
+  youtubeChatVisibleCount: 10,
   characterLayout: { x: 0, y: 0, scale: 1 },
   chatLayout: { x: 0, y: 0, scale: 1 },
 };
@@ -57,6 +65,10 @@ const sanitizeSettings = (value: unknown): LiveSettings => {
     youtubeVideoId: typeof input.youtubeVideoId === "string" ? input.youtubeVideoId : "",
     youtubeLiveChatId: typeof input.youtubeLiveChatId === "string" ? input.youtubeLiveChatId : "",
     youtubeChatEnabled: Boolean(input.youtubeChatEnabled),
+    captionsEnabled: input.captionsEnabled !== false,
+    youtubeChatWidth: Math.min(640, Math.max(240, Math.round(Number(input.youtubeChatWidth) || DEFAULT_SETTINGS.youtubeChatWidth))),
+    youtubeChatStatusVisible: input.youtubeChatStatusVisible !== false,
+    youtubeChatVisibleCount: Math.min(30, Math.max(1, Math.round(Number(input.youtubeChatVisibleCount) || DEFAULT_SETTINGS.youtubeChatVisibleCount))),
     characterLayout: sanitizeLayout(input.characterLayout, DEFAULT_SETTINGS.characterLayout),
     chatLayout: sanitizeLayout(input.chatLayout, DEFAULT_SETTINGS.chatLayout),
   };

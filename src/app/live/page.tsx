@@ -2,6 +2,8 @@
 
 import { PointerEvent, WheelEvent, useCallback, useEffect, useRef, useState } from "react";
 
+import type { PresentationLiveState } from "@/lib/presentation";
+import { defaultPresentationLiveState } from "@/lib/presentation";
 import type { GeneratedSprite, MouthTrack, Quad } from "@/lib/materials";
 import { drawWarpedPatch, waitForEvent } from "@/lib/materials";
 
@@ -51,6 +53,12 @@ type LiveSpeechMessage = {
   text: string;
   audioBuffer: ArrayBuffer;
   sourceComment?: LiveSpeechSourceComment;
+  presentationState?: PresentationLiveState;
+};
+
+type LiveSpeechStartedMessage = {
+  type: "speech-started";
+  id: string;
 };
 
 type LiveSpeechSourceComment = {
@@ -66,6 +74,8 @@ type StoredLiveSpeech = {
   audioBase64: string;
   contentType: string;
   sourceComment?: LiveSpeechSourceComment;
+  presentationState?: PresentationLiveState;
+  status?: "queued" | "started" | "ended";
   createdAt: number;
 };
 
@@ -73,11 +83,46 @@ type LiveSpeechResponse = {
   speech?: StoredLiveSpeech | null;
 };
 
+type PresentationLiveResponse = {
+  state?: PresentationLiveState;
+};
+
 type PendingSpeech = {
+  id?: string;
   emotion: Emotion;
   text: string;
   audioBuffer: ArrayBuffer;
   sourceComment?: LiveSpeechSourceComment;
+  presentationState?: PresentationLiveState;
+  playbackSegmentId?: string;
+};
+
+type PresentationPlaybackSegment = {
+  id: string;
+  text: string;
+  emotion: Emotion;
+  audioUrl: string;
+  contentType: string;
+  slideIndex: number;
+  projectId: string;
+  projectTitle: string;
+  slideCount: number;
+  slideImageUrl: string;
+};
+
+type PresentationPlaybackResponse = {
+  state?: { status?: string };
+  segment?: PresentationPlaybackSegment | null;
+};
+
+const reportSpeechStatus = (id: string, status: "started" | "ended", attempt = 0) => {
+  void fetch("/api/live-speech", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, status }),
+  }).catch(() => {
+    if (attempt < 2) window.setTimeout(() => reportSpeechStatus(id, status, attempt + 1), 500 * (attempt + 1));
+  });
 };
 
 type ServerLiveAsset = {
@@ -100,6 +145,10 @@ type LiveSettingsResponse = Partial<{
   youtubeVideoId: string;
   youtubeLiveChatId: string;
   youtubeChatEnabled: boolean;
+  captionsEnabled: boolean;
+  youtubeChatWidth: number;
+  youtubeChatStatusVisible: boolean;
+  youtubeChatVisibleCount: number;
   characterLayout: OverlayLayout;
   chatLayout: OverlayLayout;
 }>;
@@ -306,11 +355,16 @@ export default function LiveOutputPage() {
   const [youtubeVideoId, setYoutubeVideoId] = useState("");
   const [youtubeLiveChatId, setYoutubeLiveChatId] = useState("");
   const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [youtubeChatWidth, setYoutubeChatWidth] = useState(360);
+  const [youtubeChatStatusVisible, setYoutubeChatStatusVisible] = useState(true);
+  const [youtubeChatVisibleCount, setYoutubeChatVisibleCount] = useState(10);
   const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
   const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
   const [characterLayout, setCharacterLayout] = useState<OverlayLayout>(DEFAULT_CHARACTER_LAYOUT);
   const [chatLayout, setChatLayout] = useState<OverlayLayout>(DEFAULT_CHAT_LAYOUT);
   const [activeVideoIndex, setActiveVideoIndex] = useState<0 | 1>(0);
+  const [presentationState, setPresentationState] = useState<PresentationLiveState>(defaultPresentationLiveState);
 
   const videoRef0 = useRef<HTMLVideoElement | null>(null);
   const videoRef1 = useRef<HTMLVideoElement | null>(null);
@@ -334,6 +388,7 @@ export default function LiveOutputPage() {
   const youtubeLiveChatIdRef = useRef("");
   const youtubeSourceKeyRef = useRef("");
   const lastSpeechIdRef = useRef("");
+  const lastPlaybackSegmentIdRef = useRef("");
   const overlayHideTimerRef = useRef(0);
   const sourceCommentSettleTimerRef = useRef(0);
 
@@ -428,6 +483,10 @@ export default function LiveOutputPage() {
     setYoutubeVideoId(nextYoutubeVideoId);
     setYoutubeLiveChatId(nextYoutubeLiveChatId);
     setIsYoutubeChatEnabled(settings?.youtubeChatEnabled ?? localStorage.getItem("youtube_chat_enabled") === "true");
+    setCaptionsEnabled(settings?.captionsEnabled ?? localStorage.getItem("captions_enabled") !== "false");
+    setYoutubeChatWidth(settings?.youtubeChatWidth ?? Number(localStorage.getItem("youtube_chat_width") || 360));
+    setYoutubeChatStatusVisible(settings?.youtubeChatStatusVisible ?? localStorage.getItem("youtube_chat_status_visible") !== "false");
+    setYoutubeChatVisibleCount(settings?.youtubeChatVisibleCount ?? Number(localStorage.getItem("youtube_chat_visible_count") || 10));
 
     if (youtubeSourceKeyRef.current !== nextYoutubeSourceKey) {
       youtubeSourceKeyRef.current = nextYoutubeSourceKey;
@@ -610,7 +669,7 @@ export default function LiveOutputPage() {
     void video.play();
   }, [assets.normal.videoUrl]);
 
-  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer) => {
+  const playAudioAndSyncMouth = useCallback(async (audioBuffer: ArrayBuffer, speechId?: string, presentationState?: PresentationLiveState, playbackSegmentId?: string) => {
     const AudioContextClass = window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
     if (!AudioContextClass) {
       setStatus("このブラウザはWeb Audio APIに対応していません");
@@ -662,12 +721,55 @@ export default function LiveOutputPage() {
       cancelAnimationFrame(frame);
       setMouthShape("closed");
       void audioCtx.close();
+      if (presentationState) {
+        const clearedState = { ...presentationState, caption: "", updatedAt: Date.now() };
+        setPresentationState(clearedState);
+        void fetch("/api/presentation-live", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(clearedState),
+        }).catch(() => {});
+      }
+      if (speechId) {
+        reportSpeechStatus(speechId, "ended");
+      }
+      if (playbackSegmentId) {
+        void fetch("/api/presentation-playback", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "ended", segmentId: playbackSegmentId }),
+        }).catch(() => {});
+      }
       isSpeakingRef.current = false;
     };
 
     isSpeakingRef.current = true;
     setStatus("発話中");
+    if (presentationState) {
+      setPresentationState(presentationState);
+      void fetch("/api/presentation-live", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(presentationState),
+      }).catch(() => {});
+    }
     source.start(0);
+    if (speechId) {
+      reportSpeechStatus(speechId, "started");
+    }
+    if (playbackSegmentId) {
+      void fetch("/api/presentation-playback", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "started", segmentId: playbackSegmentId }),
+      }).catch(() => {});
+    }
+    if (speechId && "BroadcastChannel" in window) {
+      const channel = new BroadcastChannel(LIVE_OUTPUT_CHANNEL);
+      const message: LiveSpeechStartedMessage = { type: "speech-started", id: speechId };
+      channel.postMessage(message);
+      channel.close();
+    }
     sync();
   }, []);
 
@@ -675,6 +777,24 @@ export default function LiveOutputPage() {
     setPendingSpeech(speech);
     pendingSpeechRef.current = speech;
   }, []);
+
+  const forceStartPendingSpeech = useCallback(async (expected: PendingSpeech) => {
+    if (pendingSpeechRef.current !== expected || isSpeakingRef.current) return;
+    pendingSpeechRef.current = null;
+    setPendingSpeech(null);
+    showSpeechOverlay(expected.text, expected.sourceComment);
+    await playAudioAndSyncMouth(expected.audioBuffer, expected.id, expected.presentationState, expected.playbackSegmentId);
+    const video = getActiveVideo();
+    if (video?.paused) void video.play();
+  }, [playAudioAndSyncMouth, showSpeechOverlay]);
+
+  useEffect(() => {
+    if (!pendingSpeech) return;
+    const timer = window.setTimeout(() => {
+      void forceStartPendingSpeech(pendingSpeech);
+    }, 9_000);
+    return () => window.clearTimeout(timer);
+  }, [forceStartPendingSpeech, pendingSpeech]);
 
   const handleVideoEnded = useCallback(async () => {
     const activeIndex = activeVideoIndexRef.current;
@@ -696,7 +816,7 @@ export default function LiveOutputPage() {
       }
 
       showSpeechOverlay(pending.text, pending.sourceComment);
-      await playAudioAndSyncMouth(pending.audioBuffer);
+      await playAudioAndSyncMouth(pending.audioBuffer, pending.id, pending.presentationState, pending.playbackSegmentId);
       setPendingSpeech(null);
       pendingSpeechRef.current = null;
 
@@ -743,14 +863,60 @@ export default function LiveOutputPage() {
       if (message.id) lastSpeechIdRef.current = message.id;
 
       queueLiveSpeech({
+        id: message.id,
         emotion: message.emotion,
         text: message.text,
         audioBuffer: message.audioBuffer,
         sourceComment: message.sourceComment,
+        presentationState: message.presentationState,
       });
     };
 
     return () => channel.close();
+  }, [queueLiveSpeech]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/presentation-playback", { cache: "no-store" });
+        const data = (await response.json()) as PresentationPlaybackResponse;
+        const segment = data.segment;
+        if (!disposed && data.state?.status === "queued" && segment && segment.id !== lastPlaybackSegmentIdRef.current) {
+          lastPlaybackSegmentIdRef.current = segment.id;
+          const audioResponse = await fetch(segment.audioUrl, { cache: "no-store" });
+          if (!audioResponse.ok) throw new Error("準備済み音声を読み込めませんでした");
+          queueLiveSpeech({
+            id: undefined,
+            emotion: segment.emotion,
+            text: segment.text,
+            audioBuffer: await audioResponse.arrayBuffer(),
+            presentationState: {
+              enabled: true,
+              status: "presenting",
+              projectId: segment.projectId,
+              projectTitle: segment.projectTitle,
+              slideIndex: segment.slideIndex,
+              slideCount: segment.slideCount,
+              slideImageUrl: segment.slideImageUrl,
+              caption: segment.text,
+              updatedAt: Date.now(),
+            },
+            playbackSegmentId: segment.id,
+          });
+        }
+      } catch {
+        // 次回の監視で再試行する。発表キューはサーバーに残る。
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 400);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [queueLiveSpeech]);
 
   useEffect(() => {
@@ -765,10 +931,12 @@ export default function LiveOutputPage() {
         if (!disposed && speech && speech.id !== lastSpeechIdRef.current && isEmotion(speech.emotion)) {
           lastSpeechIdRef.current = speech.id;
           queueLiveSpeech({
+            id: speech.id,
             emotion: speech.emotion,
             text: speech.text,
             audioBuffer: base64ToArrayBuffer(speech.audioBase64),
             sourceComment: speech.sourceComment,
+            presentationState: speech.presentationState,
           });
         }
       } catch (error) {
@@ -784,6 +952,31 @@ export default function LiveOutputPage() {
       if (timer) window.clearTimeout(timer);
     };
   }, [queueLiveSpeech]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/presentation-live", { cache: "no-store" });
+        const data = (await response.json()) as PresentationLiveResponse;
+        if (!disposed && data.state) {
+          setPresentationState((current) => data.state && data.state.updatedAt >= current.updatedAt ? data.state : current);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!disposed) timer = window.setTimeout(poll, 700);
+      }
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const tick = () => {
@@ -899,13 +1092,14 @@ export default function LiveOutputPage() {
   }, [fetchYoutubeLiveChat, isYoutubeChatEnabled]);
 
   const activeAsset = assets[activeEmotion];
+  const isPresentationMode = presentationState.enabled;
 
   const shouldPinSourceComment =
     Boolean(activeSourceComment) && !youtubeMessages.some((message) => isReadingSourceComment(message, activeSourceComment));
   const displayedYoutubeMessages =
     activeSourceComment && shouldPinSourceComment
-      ? [...youtubeMessages.slice(-(LIVE_CHAT_VISIBLE_COUNT - 1)), createPinnedSourceMessage(activeSourceComment)]
-      : youtubeMessages;
+      ? [...(youtubeChatVisibleCount > 1 ? youtubeMessages.slice(-(youtubeChatVisibleCount - 1)) : []), createPinnedSourceMessage(activeSourceComment)]
+      : youtubeMessages.slice(-youtubeChatVisibleCount);
 
   return (
     <main
@@ -916,12 +1110,23 @@ export default function LiveOutputPage() {
           : { backgroundColor: bgColor }
       }
     >
+      {isPresentationMode && presentationState.slideImageUrl && (
+        <div className="absolute inset-0 z-0 grid place-items-center bg-slate-950 p-[3vh]">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={presentationState.slideImageUrl} alt={`スライド ${presentationState.slideIndex + 1}`} className="max-h-full max-w-full object-contain" />
+          <div className="absolute left-6 top-5 rounded-full bg-slate-950/70 px-4 py-1.5 text-sm font-bold shadow-lg backdrop-blur-sm">
+            {presentationState.projectTitle} · {presentationState.slideIndex + 1}/{presentationState.slideCount}
+          </div>
+        </div>
+      )}
       {activeAsset.videoUrl ? (
         <div
-          className="absolute left-1/2 top-1/2 z-10 select-none overflow-hidden"
+          className="absolute z-10 select-none overflow-hidden"
           style={{
-            height: "min(82vh, 56.25vw)",
-            width: "min(92vw, 145.78vh)",
+            height: isPresentationMode ? "min(38vh, 26vw)" : "min(82vh, 56.25vw)",
+            width: isPresentationMode ? "min(46vw, 67.5vh)" : "min(92vw, 145.78vh)",
+            left: isPresentationMode ? "17%" : "50%",
+            top: isPresentationMode ? "75%" : "50%",
             transform: `translate(-50%, -50%) translate(${characterLayout.x}px, ${characterLayout.y}px) scale(${characterLayout.scale})`,
             transformOrigin: "center center",
             cursor: "grab",
@@ -957,16 +1162,17 @@ export default function LiveOutputPage() {
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
           </div>
         </div>
-      ) : (
+      ) : !isPresentationMode ? (
         <div className="absolute inset-0 grid place-items-center bg-slate-950 text-sm font-semibold text-white">
           {status}
         </div>
-      )}
+      ) : null}
 
       {isYoutubeChatEnabled && (
         <div
           className="absolute right-6 top-6 z-20 flex max-h-[58vh] w-[min(360px,calc(100vw-48px))] select-none flex-col justify-end gap-2 overflow-visible"
           style={{
+            width: `min(${youtubeChatWidth}px, calc(100vw - 48px))`,
             transform: `translate(${chatLayout.x}px, ${chatLayout.y}px) scale(${chatLayout.scale})`,
             transformOrigin: "top right",
             cursor: "grab",
@@ -978,9 +1184,9 @@ export default function LiveOutputPage() {
           onPointerCancel={stopDrag}
           onWheel={(event) => handleLayoutWheel("chat", event)}
         >
-          <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
+          {youtubeChatStatusVisible && <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold shadow-lg backdrop-blur-sm">
             YouTube Chat · {youtubeChatStatus}
-          </div>
+          </div>}
           {displayedYoutubeMessages.map((message) => {
             const matchesSourceComment = isReadingSourceComment(message, activeSourceComment);
             const hasReadingComment = isSourceCommentHighlightActive && activeSourceComment;
@@ -1039,10 +1245,10 @@ export default function LiveOutputPage() {
         </div>
       )}
 
-      {lastReply && (
+      {captionsEnabled && (isPresentationMode ? presentationState.caption : lastReply) && (
         <div className="pointer-events-none absolute bottom-8 left-1/2 z-20 w-[min(860px,calc(100vw-48px))] -translate-x-1/2">
           <div className="rounded-md bg-slate-950/55 px-5 py-3 text-center text-lg font-semibold leading-relaxed shadow-lg backdrop-blur-sm">
-            {lastReply}
+            {isPresentationMode ? presentationState.caption : lastReply}
           </div>
         </div>
       )}

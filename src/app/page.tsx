@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable react-hooks/immutability -- This legacy client page intentionally coordinates mutable video elements and refs. */
+
 import {
   Activity,
   Bot,
@@ -11,7 +13,9 @@ import {
   Minus,
   Play,
   Plus,
+  Presentation,
   Radio,
+  RotateCcw,
   Send,
   Settings,
   Sparkles,
@@ -21,6 +25,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
+import PresentationConsole from "@/app/presentation/presentation-console";
 import type { GeneratedSprite, Mode, MouthFrame, MouthlessCleanPlate, MouthlessMask, MouthSpriteName, MouthTrack, Quad, SpeedMode, WorkerMessage } from "@/lib/materials";
 import {
   analyzeMouthPatchFeatures,
@@ -191,7 +196,28 @@ type LiveSettingsPatch = Partial<{
   youtubeVideoId: string;
   youtubeLiveChatId: string;
   youtubeChatEnabled: boolean;
+  captionsEnabled: boolean;
+  youtubeChatWidth: number;
+  youtubeChatStatusVisible: boolean;
+  youtubeChatVisibleCount: number;
+  characterLayout: { x: number; y: number; scale: number };
 }>;
+
+type PersonaSettings = {
+  name: string;
+  firstPerson: string;
+  personality: string;
+  speakingStyle: string;
+  responsePolicy: string;
+};
+
+const defaultPersona: PersonaSettings = {
+  name: "AITuber",
+  firstPerson: "私",
+  personality: "親しみやすく、誠実で、落ち着いている",
+  speakingStyle: "丁寧で自然な日本語。必要以上に大げさにしない。",
+  responsePolicy: "不明なことは推測で断定せず、正直に伝える。",
+};
 
 const EMOTIONS: { key: Emotion; label: string }[] = [
   { key: "normal", label: "通常" },
@@ -202,7 +228,9 @@ const EMOTIONS: { key: Emotion; label: string }[] = [
 ];
 
 const LIVE_OUTPUT_CHANNEL = "aituber-maker-live-output";
-const LIVE_CHAT_VISIBLE_COUNT = 10;
+const MAX_YOUTUBE_MESSAGE_HISTORY = 500;
+
+const personaPrompt = (persona: PersonaSettings) => `\nキャラクター設定:\n- 名前: ${persona.name || defaultPersona.name}\n- 一人称: ${persona.firstPerson || defaultPersona.firstPerson}\n- 性格: ${persona.personality || defaultPersona.personality}\n- 話し方: ${persona.speakingStyle || defaultPersona.speakingStyle}\n- 回答方針: ${persona.responsePolicy || defaultPersona.responsePolicy}\nこの設定を守って返答してください。`;
 
 const createLiveSpeechSourceComment = (message: YouTubeChatMessage): LiveSpeechSourceComment => ({
   id: message.id,
@@ -293,6 +321,7 @@ export default function Home() {
 
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
+  const [persona, setPersona] = useState<PersonaSettings>(defaultPersona);
   const [availableModels, setAvailableModels] = useState<string[]>([
     "gpt-4o-mini",
     "gpt-4o",
@@ -309,6 +338,7 @@ export default function Home() {
   const [aivisCloudStyleName, setAivisCloudStyleName] = useState("");
   const [aivisCloudUserDictionaryUuid, setAivisCloudUserDictionaryUuid] = useState("");
   const [aivisCloudOutputFormat, setAivisCloudOutputFormat] = useState("mp3");
+  const [localSpeakingRate, setLocalSpeakingRate] = useState("1.0");
   const [aivisCloudSpeakingRate, setAivisCloudSpeakingRate] = useState("1.0");
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
@@ -321,6 +351,10 @@ export default function Home() {
   const [youtubeVideoId, setYoutubeVideoId] = useState("");
   const [youtubeLiveChatId, setYoutubeLiveChatId] = useState("");
   const [isYoutubeChatEnabled, setIsYoutubeChatEnabled] = useState(false);
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [youtubeChatWidth, setYoutubeChatWidth] = useState(360);
+  const [youtubeChatStatusVisible, setYoutubeChatStatusVisible] = useState(true);
+  const [youtubeChatVisibleCount, setYoutubeChatVisibleCount] = useState(10);
   const [youtubeChatStatus, setYoutubeChatStatus] = useState("未接続");
   const [youtubeMessages, setYoutubeMessages] = useState<YouTubeChatMessage[]>([]);
   const [selectedYoutubeMessageId, setSelectedYoutubeMessageId] = useState("");
@@ -499,6 +533,7 @@ export default function Home() {
     window.requestAnimationFrame(async () => {
       const key = localStorage.getItem("openai_api_key") || "";
       const model = localStorage.getItem("openai_model") || "gpt-4o-mini";
+      const savedPersona = JSON.parse(localStorage.getItem("character_persona") || "null") as Partial<PersonaSettings> | null;
       const tts = (localStorage.getItem("tts_type") as TtsType) || "aivis";
       const url = localStorage.getItem("aivis_url") || "http://127.0.0.1:10101";
       const speaker = localStorage.getItem("aivis_speaker") || "2";
@@ -509,6 +544,7 @@ export default function Home() {
       const cloudUserDictionaryUuid = localStorage.getItem("aivis_cloud_user_dictionary_uuid") || "";
       const cloudOutputFormat = localStorage.getItem("aivis_cloud_output_format") || "mp3";
       const cloudSpeakingRate = localStorage.getItem("aivis_cloud_speaking_rate") || "1.0";
+      const savedLocalSpeakingRate = localStorage.getItem("local_speaking_rate") || "1.0";
       const bgType = (localStorage.getItem("runtime_bg_type") as "color" | "image") || "color";
       const bgColor = localStorage.getItem("runtime_bg_color") || "#ffffff";
       const savedYoutubeApiKey = localStorage.getItem("youtube_api_key") || "";
@@ -527,9 +563,14 @@ export default function Home() {
       const nextYoutubeVideoId = liveSettings?.youtubeVideoId || savedYoutubeVideoId;
       const nextYoutubeLiveChatId = liveSettings?.youtubeLiveChatId || savedYoutubeLiveChatId;
       const nextYoutubeChatEnabled = liveSettings?.youtubeChatEnabled ?? savedYoutubeChatEnabled;
+      const nextCaptionsEnabled = liveSettings?.captionsEnabled ?? localStorage.getItem("captions_enabled") !== "false";
+      const nextYoutubeChatWidth = liveSettings?.youtubeChatWidth ?? Number(localStorage.getItem("youtube_chat_width") || 360);
+      const nextYoutubeChatStatusVisible = liveSettings?.youtubeChatStatusVisible ?? localStorage.getItem("youtube_chat_status_visible") !== "false";
+      const nextYoutubeChatVisibleCount = liveSettings?.youtubeChatVisibleCount ?? Number(localStorage.getItem("youtube_chat_visible_count") || 10);
 
       setOpenaiApiKey(key);
       setOpenaiModel(model);
+      setPersona({ ...defaultPersona, ...savedPersona });
       setTtsType(tts);
       setAivisUrl(url);
       setSelectedSpeaker(speaker);
@@ -539,6 +580,7 @@ export default function Home() {
       setAivisCloudStyleName(cloudStyleName);
       setAivisCloudUserDictionaryUuid(cloudUserDictionaryUuid);
       setAivisCloudOutputFormat(cloudOutputFormat);
+      setLocalSpeakingRate(savedLocalSpeakingRate);
       setAivisCloudSpeakingRate(cloudSpeakingRate);
       setRuntimeBgType(nextBgType === "image" ? "color" : nextBgType);
       setRuntimeBgColor(nextBgColor);
@@ -546,6 +588,10 @@ export default function Home() {
       setYoutubeVideoId(nextYoutubeVideoId);
       setYoutubeLiveChatId(nextYoutubeLiveChatId);
       setIsYoutubeChatEnabled(Boolean(nextYoutubeChatEnabled));
+      setCaptionsEnabled(nextCaptionsEnabled);
+      setYoutubeChatWidth(nextYoutubeChatWidth);
+      setYoutubeChatStatusVisible(nextYoutubeChatStatusVisible);
+      setYoutubeChatVisibleCount(nextYoutubeChatVisibleCount);
       setIsLocalSpeechPlaybackEnabled(savedLocalSpeechPlayback !== "false");
       setIsLocalCharacterPreviewEnabled(savedLocalCharacterPreview !== "false");
 
@@ -635,15 +681,25 @@ export default function Home() {
     }
 
     if (emotionAssets.normal?.videoUrl && runtimeVideoRef0.current) {
-      if (!videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
+      const primaryVideo = runtimeVideoRef0.current;
+      // モード移動でvideo要素はアンマウントされるが、素材用のrefは残る。
+      // 新しくマウントされたvideo要素にはsrcが無いため、要素側も判定に含めて再初期化する。
+      const needsRestore = primaryVideo.src !== emotionAssets.normal.videoUrl;
+      if (needsRestore || !videoAsset0Ref.current || videoAsset0Ref.current.videoUrl !== emotionAssets.normal.videoUrl) {
+        activeVideoIndexRef.current = 0;
+        setActiveVideoIndex(0);
+        setCurrentEmotion("normal");
+        setMouthlessUrl(emotionAssets.normal.videoUrl);
+        setTrack(emotionAssets.normal.track);
         videoAsset0Ref.current = {
           videoUrl: emotionAssets.normal.videoUrl,
           track: emotionAssets.normal.track,
           emotion: "normal",
         };
-        runtimeVideoRef0.current.src = emotionAssets.normal.videoUrl;
-        runtimeVideoRef0.current.load();
-        void runtimeVideoRef0.current.play();
+        videoAsset1Ref.current = null;
+        primaryVideo.src = emotionAssets.normal.videoUrl;
+        primaryVideo.load();
+        void primaryVideo.play();
       }
     }
   }, [mode, emotionAssets, isLocalCharacterPreviewEnabled]);
@@ -657,6 +713,14 @@ export default function Home() {
   const handleOpenaiModelChange = (model: string) => {
     setOpenaiModel(model);
     localStorage.setItem("openai_model", model);
+  };
+
+  const handlePersonaChange = (patch: Partial<PersonaSettings>) => {
+    setPersona((current) => {
+      const next = { ...current, ...patch };
+      localStorage.setItem("character_persona", JSON.stringify(next));
+      return next;
+    });
   };
 
   const handleTtsTypeChange = (type: TtsType) => {
@@ -723,10 +787,50 @@ export default function Home() {
     localStorage.setItem("aivis_cloud_speaking_rate", speakingRate);
   };
 
+  const handleLocalSpeakingRateChange = (speakingRate: string) => {
+    setLocalSpeakingRate(speakingRate);
+    localStorage.setItem("local_speaking_rate", speakingRate);
+  };
+
   const handleYoutubeApiKeyChange = (key: string) => {
     setYoutubeApiKey(key);
     localStorage.setItem("youtube_api_key", key);
     void saveLiveSettingsForObs({ youtubeApiKey: key });
+  };
+
+  const handleCaptionsEnabledChange = (enabled: boolean) => {
+    setCaptionsEnabled(enabled);
+    localStorage.setItem("captions_enabled", String(enabled));
+    void saveLiveSettingsForObs({ captionsEnabled: enabled });
+  };
+
+  const handleYoutubeChatWidthChange = (width: number) => {
+    const next = Math.min(640, Math.max(240, width || 360));
+    setYoutubeChatWidth(next);
+    localStorage.setItem("youtube_chat_width", String(next));
+    void saveLiveSettingsForObs({ youtubeChatWidth: next });
+  };
+
+  const handleYoutubeChatStatusVisibleChange = (visible: boolean) => {
+    setYoutubeChatStatusVisible(visible);
+    localStorage.setItem("youtube_chat_status_visible", String(visible));
+    void saveLiveSettingsForObs({ youtubeChatStatusVisible: visible });
+  };
+
+  const handleYoutubeChatVisibleCountChange = (count: number) => {
+    const next = Math.min(30, Math.max(1, count || 10));
+    setYoutubeChatVisibleCount(next);
+    localStorage.setItem("youtube_chat_visible_count", String(next));
+    void saveLiveSettingsForObs({ youtubeChatVisibleCount: next });
+  };
+
+  const resetObsCharacterLayout = async () => {
+    try {
+      await saveLiveSettingsForObs({ characterLayout: { x: 0, y: 0, scale: 1 } });
+      setLiveAssetSyncStatus("OBS用キャラの位置と拡大率を初期値へ戻しました");
+    } catch (error) {
+      setLiveAssetSyncStatus(error instanceof Error ? error.message : "キャラ位置をリセットできませんでした");
+    }
   };
 
   const handleYoutubeVideoIdChange = (videoId: string) => {
@@ -811,11 +915,14 @@ export default function Home() {
 
     const incoming = (data.messages ?? []).filter((message) => message.message.trim());
     if (incoming.length) {
-      youtubeMessageIdsRef.current = new Set(incoming.map((message) => message.id));
-      setYoutubeMessages(incoming.slice(-LIVE_CHAT_VISIBLE_COUNT));
+      const newMessages = incoming.filter((message) => !youtubeMessageIdsRef.current.has(message.id));
+      incoming.forEach((message) => youtubeMessageIdsRef.current.add(message.id));
+      if (newMessages.length) {
+        setYoutubeMessages((current) => [...current, ...newMessages].slice(-MAX_YOUTUBE_MESSAGE_HISTORY));
+      }
     }
 
-    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / ${Math.min(incoming.length, LIVE_CHAT_VISIBLE_COUNT)}件表示`);
+    setYoutubeChatStatus(`接続中: ${data.fetchedCount ?? incoming.length}件取得 / 最大${MAX_YOUTUBE_MESSAGE_HISTORY}件を保持`);
     return Math.max(1000, data.pollingIntervalMillis || 5000);
   }, [youtubeApiKey, youtubeVideoId, youtubeLiveChatId]);
 
@@ -848,13 +955,6 @@ export default function Home() {
     };
   }, [mode, isYoutubeChatEnabled, fetchYoutubeLiveChat]);
 
-  useEffect(() => {
-    if (!selectedYoutubeMessageId) return;
-    if (!youtubeMessages.some((message) => message.id === selectedYoutubeMessageId)) {
-      setSelectedYoutubeMessageId("");
-    }
-  }, [selectedYoutubeMessageId, youtubeMessages]);
-
   const sendMessageToCharacter = async ({
     llmMessage,
     displayMessage,
@@ -873,6 +973,16 @@ export default function Home() {
     setIsChatSending(true);
 
     try {
+      let presentationContext = "";
+      if (speechSourceComment) {
+        const liveStateResponse = await fetch("/api/presentation-live", { cache: "no-store" });
+        const liveState = await liveStateResponse.json().catch(() => ({})) as { state?: { projectId?: string } };
+        if (liveState.state?.projectId) {
+          const contextResponse = await fetch(`/api/presentation-context?id=${encodeURIComponent(liveState.state.projectId)}`, { cache: "no-store" });
+          const contextData = await contextResponse.json().catch(() => ({})) as { context?: string };
+          presentationContext = contextData.context || "";
+        }
+      }
       // 1. OpenAI Chat Completion
       const chatRes = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -899,7 +1009,10 @@ JSONフォーマット例:
 - "嬉しい"
 - "怒り"
 - "驚き"
-- "悲しい"`,
+- "悲しい"
+${personaPrompt(persona)}
+
+${presentationContext ? `以下は現在のゼミ発表の根拠資料です。コメントへの回答はこの資料に基づき、根拠がなければ推測で断定せず「現時点では確認できていません」と答えてください。\n\n${presentationContext}` : ""}`,
             },
             { role: "user", content: trimmedMessage },
           ],
@@ -956,6 +1069,7 @@ JSONフォーマット例:
           aivisCloudUserDictionaryUuid,
           aivisCloudOutputFormat,
           aivisCloudSpeakingRate,
+          localSpeakingRate,
         }),
       });
 
@@ -974,7 +1088,7 @@ JSONフォーマット例:
       const audioContentType = synthRes.headers.get("content-type") || "audio/wav";
       const audioBuffer = await synthRes.arrayBuffer();
       const liveAudioBuffer = audioBuffer.slice(0);
-      const speechId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const speechId = crypto.randomUUID();
 
       if (isLocalSpeechPlaybackEnabled && isLocalCharacterPreviewEnabled) {
         // 動画のループ終了時に切り替えるため、保留中（キュー）に設定
@@ -2437,6 +2551,7 @@ JSONフォーマット例:
                 <nav className="flex rounded-md border border-slate-200 bg-white p-1 shadow-sm transition-all duration-300">
                   <ModeButton active={mode === "materials"} icon={<Wand2 />} label="素材生成" onClick={() => setMode("materials")} />
                   <ModeButton active={mode === "runtime"} icon={<Radio />} label="配信モード" onClick={() => setMode("runtime")} />
+                  <ModeButton active={mode === "presentation"} icon={<Presentation />} label="発表" onClick={() => setMode("presentation")} />
                   <ModeButton active={mode === "settings"} icon={<Settings />} label="設定" onClick={() => setMode("settings")} />
                 </nav>
                 <button
@@ -2764,44 +2879,46 @@ JSONフォーマット例:
             )}
 
             {isYoutubeChatEnabled && (
-              <div className="absolute right-6 top-24 z-40 flex max-h-[58vh] w-[min(380px,calc(100vw-48px))] flex-col justify-end gap-2 overflow-hidden">
-                <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
+              <div className="absolute right-6 top-24 z-40 flex h-[58vh] flex-col gap-2" style={{ width: `min(${youtubeChatWidth}px, calc(100vw - 48px))` }}>
+                {youtubeChatStatusVisible && <div className="self-end rounded-full border border-white/30 bg-slate-950/55 px-3 py-1 text-[11px] font-semibold text-white shadow-lg backdrop-blur-sm">
                   YouTube Chat · {youtubeChatStatus}
+                </div>}
+                <div data-youtube-comment-list className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-1">
+                  {youtubeMessages.map((message) => (
+                    <button
+                      key={message.id}
+                      type="button"
+                      onClick={() => setSelectedYoutubeMessageId(message.id)}
+                      className={`flex w-full gap-2 rounded-2xl border px-3 py-2 text-left text-sm text-slate-900 shadow-lg backdrop-blur-sm transition ${
+                        selectedYoutubeMessageId === message.id
+                          ? "border-teal-400 bg-teal-50/95 ring-2 ring-teal-300"
+                          : "border-white/20 bg-white/92 hover:border-teal-300 hover:bg-white"
+                      }`}
+                    >
+                      {message.authorImageUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={message.authorImageUrl}
+                          alt=""
+                          className="mt-0.5 size-7 flex-none rounded-full bg-slate-200"
+                        />
+                      ) : (
+                        <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
+                          {message.authorName.slice(0, 1)}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
+                          {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
+                          {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
+                          {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
+                        </div>
+                        <div className="break-words leading-relaxed">{message.message}</div>
+                      </div>
+                    </button>
+                  ))}
                 </div>
-                {youtubeMessages.map((message) => (
-                  <button
-                    key={message.id}
-                    type="button"
-                    onClick={() => setSelectedYoutubeMessageId(message.id)}
-                    className={`flex w-full gap-2 rounded-2xl border px-3 py-2 text-left text-sm text-slate-900 shadow-lg backdrop-blur-sm transition ${
-                      selectedYoutubeMessageId === message.id
-                        ? "border-teal-400 bg-teal-50/95 ring-2 ring-teal-300"
-                        : "border-white/20 bg-white/92 hover:border-teal-300 hover:bg-white"
-                    }`}
-                  >
-                    {message.authorImageUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={message.authorImageUrl}
-                        alt=""
-                        className="mt-0.5 size-7 flex-none rounded-full bg-slate-200"
-                      />
-                    ) : (
-                      <div className="mt-0.5 grid size-7 flex-none place-items-center rounded-full bg-teal-600 text-xs font-bold text-white">
-                        {message.authorName.slice(0, 1)}
-                      </div>
-                    )}
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-1">
-                        <span className="truncate text-xs font-bold text-slate-700">{message.authorName}</span>
-                        {message.isOwner && <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-700">OWNER</span>}
-                        {message.isModerator && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700">MOD</span>}
-                        {message.isSponsor && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">MEMBER</span>}
-                      </div>
-                      <div className="break-words leading-relaxed">{message.message}</div>
-                    </div>
-                  </button>
-                ))}
                 {selectedYoutubeMessage && (
                   <div className="rounded-2xl border border-teal-200 bg-white/95 p-3 text-sm text-slate-900 shadow-xl backdrop-blur-sm">
                     <div className="flex items-start justify-between gap-3">
@@ -2845,7 +2962,7 @@ JSONフォーマット例:
               )}
 
               {/* Latest Reply Bubble */}
-              {lastReply && (
+              {captionsEnabled && lastReply && (
                 <div className="self-start rounded-2xl border border-slate-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur-sm max-w-[85%] text-sm text-slate-800 transition-all relative">
                   <div className="absolute -top-2.5 left-4 px-2 py-0.5 rounded bg-teal-600 text-[10px] font-bold text-white shadow-sm">
                     {EMOTIONS.find(e => e.key === currentEmotion)?.label || "通常"}
@@ -2878,6 +2995,12 @@ JSONフォーマット例:
               </div>
             </div>
           </div>
+        )}
+
+        {mode === "presentation" && (
+          <section className="mx-auto w-full max-w-[1600px] flex-1 px-5 pt-24 pb-4">
+            <PresentationConsole embedded />
+          </section>
         )}
 
         {mode === "settings" && (
@@ -2913,6 +3036,20 @@ JSONフォーマット例:
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="grid gap-4 rounded-md border border-slate-200 bg-slate-50 p-4">
+                  <div>
+                    <label className="text-sm font-semibold text-slate-800">キャラクターペルソナ</label>
+                    <p className="mt-1 text-xs text-slate-500">通常チャットとYouTubeコメント応答に常に反映されます。</p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="grid gap-1.5 text-sm font-semibold">名前<input value={persona.name} onChange={(event) => handlePersonaChange({ name: event.target.value })} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" /></label>
+                    <label className="grid gap-1.5 text-sm font-semibold">一人称<input value={persona.firstPerson} onChange={(event) => handlePersonaChange({ firstPerson: event.target.value })} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" /></label>
+                  </div>
+                  <label className="grid gap-1.5 text-sm font-semibold">性格<textarea value={persona.personality} onChange={(event) => handlePersonaChange({ personality: event.target.value })} className="min-h-20 resize-y rounded-md border border-slate-200 bg-white p-3 font-normal" /></label>
+                  <label className="grid gap-1.5 text-sm font-semibold">話し方<textarea value={persona.speakingStyle} onChange={(event) => handlePersonaChange({ speakingStyle: event.target.value })} className="min-h-20 resize-y rounded-md border border-slate-200 bg-white p-3 font-normal" /></label>
+                  <label className="grid gap-1.5 text-sm font-semibold">回答方針<textarea value={persona.responsePolicy} onChange={(event) => handlePersonaChange({ responsePolicy: event.target.value })} className="min-h-20 resize-y rounded-md border border-slate-200 bg-white p-3 font-normal" /></label>
                 </div>
 
                 {/* Voice Synthesis Engine Selection */}
@@ -3096,6 +3233,22 @@ JSONフォーマット例:
                 </div>
                 )}
 
+                {ttsType !== "aivis-cloud" && (
+                  <div className="grid gap-2">
+                    <label className="text-sm font-semibold text-slate-800">話速</label>
+                    <input
+                      type="number"
+                      min="0.5"
+                      max="2"
+                      step="0.1"
+                      value={localSpeakingRate}
+                      onChange={(event) => handleLocalSpeakingRateChange(event.target.value)}
+                      className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-teal-500 focus:outline-none"
+                    />
+                    <p className="text-xs text-slate-500">AivisSpeechローカル・VOICEVOX・カスタム接続先に共通で適用します。1.0が標準です。</p>
+                  </div>
+                )}
+
                 {/* YouTube Live Chat */}
                 <div className="h-px bg-slate-200 my-4" />
 
@@ -3113,6 +3266,21 @@ JSONフォーマット例:
                         onChange={(event) => handleYoutubeChatEnabledChange(event.target.checked)}
                       />
                       表示する
+                    </label>
+                  </div>
+
+                  <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 md:grid-cols-2">
+                    <label className="flex items-center justify-between gap-3 text-sm font-semibold text-slate-800">字幕を表示
+                      <input type="checkbox" className="size-4 accent-teal-600" checked={captionsEnabled} onChange={(event) => handleCaptionsEnabledChange(event.target.checked)} />
+                    </label>
+                    <label className="flex items-center justify-between gap-3 text-sm font-semibold text-slate-800">接続状態ラベルを表示
+                      <input type="checkbox" className="size-4 accent-teal-600" checked={youtubeChatStatusVisible} onChange={(event) => handleYoutubeChatStatusVisibleChange(event.target.checked)} />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-semibold text-slate-800 md:col-span-2">コメント欄の横幅（px）
+                      <input type="number" min="240" max="640" step="10" value={youtubeChatWidth} onChange={(event) => handleYoutubeChatWidthChange(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" />
+                    </label>
+                    <label className="grid gap-1.5 text-sm font-semibold text-slate-800 md:col-span-2">OBSに表示するコメント数
+                      <input type="number" min="1" max="30" step="1" value={youtubeChatVisibleCount} onChange={(event) => handleYoutubeChatVisibleCountChange(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-2 font-normal" />
                     </label>
                   </div>
 
@@ -3416,6 +3584,16 @@ JSONフォーマット例:
                 <div className="h-px bg-slate-200 my-4" />
                 
                 <div className="grid gap-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800">OBS用キャラの表示位置</p>
+                      <p className="mt-1 text-xs text-slate-500">ドラッグや拡大で画面外へ移動したキャラを、中央の初期位置へ戻します。</p>
+                    </div>
+                    <button type="button" onClick={() => void resetObsCharacterLayout()} className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100">
+                      <RotateCcw className="size-3.5" />
+                      キャラ位置をリセット
+                    </button>
+                  </div>
                   <label className="text-sm font-semibold text-slate-800">配信モードの背景</label>
                   
                   {/* Selector between Color and Image */}
