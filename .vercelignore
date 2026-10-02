@@ -1,0 +1,6 @@
+# Local-only ONNX model artifacts. The largest file exceeds Vercel's
+# per-file deployment limit and models are intended to be installed locally.
+public/models/*
+
+# Local runtime state and generated files.
+.aituber-*.json
